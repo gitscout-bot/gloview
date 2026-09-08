@@ -881,6 +881,14 @@ void Overview::open() {
 void Overview::close() {
     if (!m_active)
         return;
+    // Every tile's box as it is ON SCREEN right now, taken before the state flips below (the
+    // reflow timer and the switch slide both feed currentBox): the freeze box for the tiles
+    // that fade out in place instead of gliding home.
+    std::vector<LRect> onScreen;
+    onScreen.reserve(m_tiles.size());
+    for (size_t i = 0; i < m_tiles.size(); ++i)
+        onScreen.push_back(currentBox(m_tiles[i], static_cast<int>(i)));
+
     m_opening   = false;
     m_reflowing = false;
     endWsSlide();
@@ -894,13 +902,31 @@ void Overview::close() {
     // glides target -> real pixel-perfect (renderMainWindows assumes "progress 0 == real").
     // `natural` gets repurposed as a reflow START box (always in desktop mode, after any
     // swap/drop reflow), so without this windows jump on close.
+    //
+    // EXCEPT tiles whose window is not part of the desktop we land on: in expo, a window on
+    // any workspace other than the one just committed (a hidden scratchpad counts too). Its
+    // real geometry is a place it will NOT occupy once the overlay is gone, and gliding it
+    // there paints it over the windows that DO land — one maximized window per workspace
+    // shares the very same rect, so the later-drawn tile (the OTHER workspace's window)
+    // expanded over the picked one until deactivate() swapped the real window in. Such a
+    // tile is frozen where it is (natural == target) and fades out with the chrome, queued
+    // under the landing set (renderMainWindows / drawPreviewTile).
     if (const auto m = m_monitor.lock()) {
-        for (auto& t : m_tiles) {
-            if (const auto w = t.win.lock()) {
-                const auto p = w->positionAnimation()->goal();
-                const auto s = w->sizeAnimation()->goal();
-                t.natural    = LRect{p.x - m->m_position.x, p.y - m->m_position.y, std::max(1.0, s.x), std::max(1.0, s.y)};
+        const auto dest = m_workspace.lock();
+        for (size_t i = 0; i < m_tiles.size(); ++i) {
+            auto&      t = m_tiles[i];
+            const auto w = t.win.lock();
+            if (!w)
+                continue;
+            const auto wws = w->m_workspace;
+            t.fadeOut      = wws && wws != dest && wws != m->m_activeSpecialWorkspace;
+            if (t.fadeOut) {
+                t.natural = t.target = onScreen[i];
+                continue;
             }
+            const auto p = w->positionAnimation()->goal();
+            const auto s = w->sizeAnimation()->goal();
+            t.natural    = LRect{p.x - m->m_position.x, p.y - m->m_position.y, std::max(1.0, s.x), std::max(1.0, s.y)};
         }
     }
 
@@ -1984,7 +2010,9 @@ void Overview::drawPreviewTile(size_t i, const LRect& slot, bool lift) const {
     // pixel space, so on a fractional edge the backing is ~1px wider and peeks as a dark seam;
     // the inset keeps it under the over-covered surface.
     const LRect bb{lb.x + 1.0, lb.y + 1.0, std::max(0.0, lb.w - 2.0), std::max(0.0, lb.h - 2.0)};
-    g_pHyprOpenGL->renderRect(pxb(bb, s), argb(cfgColor("plugin:gloview:preview_bg", 0xff14181f), 1.0), {.round = pxr(round, s)});
+    // A tile fading out on close (see close()) takes its backing with it, else the dark slab
+    // outlives the surface and pops away on the last frame.
+    g_pHyprOpenGL->renderRect(pxb(bb, s), argb(cfgColor("plugin:gloview:preview_bg", 0xff14181f), t.fadeOut ? e : 1.0), {.round = pxr(round, s)});
 
     // desktop (canvas) mode: a "✕" close button in the top-right of every preview.
     if (m_desktopMode && !lift) {
@@ -2086,11 +2114,16 @@ LRect Overview::dragBox() const {
 
 void Overview::renderPreviews() const {
     const int dragIdx = (m_dragging && m_pressTile >= 0 && m_pressTile < static_cast<int>(m_tiles.size())) ? m_pressTile : -1;
-    for (size_t i = 0; i < m_tiles.size(); ++i) {
-        if (static_cast<int>(i) == dragIdx)
-            continue; // the dragged tile floats over the strip; drawn later in renderDragTile()
-        drawPreviewTile(i, currentBox(m_tiles[i], static_cast<int>(i)), false);
-    }
+    // Tiles fading out on close go first, so the landing set paints over them (same order as
+    // renderMainWindows).
+    for (const bool fading : {true, false})
+        for (size_t i = 0; i < m_tiles.size(); ++i) {
+            if (static_cast<int>(i) == dragIdx)
+                continue; // the dragged tile floats over the strip; drawn later in renderDragTile()
+            if (m_tiles[i].fadeOut != fading)
+                continue;
+            drawPreviewTile(i, currentBox(m_tiles[i], static_cast<int>(i)), false);
+        }
 }
 
 // Queues the LIVE surfaces for the main-area tiles (except the dragged one), above their
@@ -2103,19 +2136,25 @@ void Overview::renderMainWindows() const {
     // At progress 0, currentBox == t.natural == the real window's settled geometry, so the
     // opaque preview overlays it pixel-perfect. Fading with `e` would flicker the close tail:
     // preview alpha hits 0 while the real window is still hidden → desktop shows through.
+    // The one exception is a tile close() marked fadeOut: its window will NOT be on the desktop
+    // we land on, so there is no real window to hand over to. It fades with the chrome, frozen
+    // in place, and is queued FIRST so the landing tiles paint over it.
     const int    dragIdx = (m_dragging && m_pressTile >= 0 && m_pressTile < static_cast<int>(m_tiles.size())) ? m_pressTile : -1;
     const double scale   = m->m_scale;
+    const double e       = eased();
+    const double round   = cfgInt("plugin:gloview:preview_round", 12);
     const auto   when    = Time::steadyNow();
-    for (size_t i = 0; i < m_tiles.size(); ++i) {
-        if (static_cast<int>(i) == dragIdx)
-            continue;
-        const auto w = m_tiles[i].win.lock();
-        if (!w || !w->m_isMapped || w->isHidden())
-            continue;
-        const LRect lb = tileContentBox(i, currentBox(m_tiles[i], static_cast<int>(i)));
-        const CBox  px(lb.x * scale, lb.y * scale, lb.w * scale, lb.h * scale);
-        renderWindowLive(w, m, px, px, 1.0F, when, m_previewFilterGrid, static_cast<double>(cfgInt("plugin:gloview:preview_round", 12)));
-    }
+    for (const bool fading : {true, false})
+        for (size_t i = 0; i < m_tiles.size(); ++i) {
+            if (static_cast<int>(i) == dragIdx || m_tiles[i].fadeOut != fading)
+                continue;
+            const auto w = m_tiles[i].win.lock();
+            if (!w || !w->m_isMapped || w->isHidden())
+                continue;
+            const LRect lb = tileContentBox(i, currentBox(m_tiles[i], static_cast<int>(i)));
+            const CBox  px(lb.x * scale, lb.y * scale, lb.w * scale, lb.h * scale);
+            renderWindowLive(w, m, px, px, fading ? static_cast<float>(e) : 1.0F, when, m_previewFilterGrid, round);
+        }
 }
 
 // Chrome for the outgoing workspace's tiles during a switch slide: shadow + opaque backing
