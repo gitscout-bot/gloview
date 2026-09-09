@@ -123,6 +123,10 @@ class Overview {
         LRect                snapSource; // window's frozen position when its snapshot was taken; crop source
         SP<Render::ITexture> label;   // cached window title, shown on hover
         bool                 captured = false; // snapshot was (re)taken THIS session; guards stale persistent FBs
+        // Set by close(): the window is NOT part of the desktop the overlay lands on (expo: it
+        // lives on another workspace). The tile is frozen at its on-screen box and faded out
+        // UNDER the landing tiles instead of gliding to a real geometry it will not occupy.
+        bool                 fadeOut = false;
     };
 
     struct StripWin {
