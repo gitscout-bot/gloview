@@ -272,13 +272,15 @@ slide away). Consequences:
   `m_allOverride` is the runtime tri-state (-1 follow config / 0 forced off / 1 forced on),
   reset on full close. Picking a preview in expo **follows** it — the overview closes onto
   that window's workspace (`activateWindow`), which is separate from plain selection.
-  **On close only the tiles landing on the committed workspace (`m_workspace`, or the active
-  scratchpad) glide to their real geometry; every other tile is `Tile::fadeOut`** — frozen at
-  its on-screen box (`natural == target`) and faded with the chrome, queued *under* the landing
-  set (`renderMainWindows` / `renderPreviews` draw fading tiles first, `drawPreviewTile` fades
-  the backing). Without this, a maximized window on each of two workspaces shares one real
-  rect, so the later-drawn tile — the *other* workspace's window — expanded over the picked one
-  and the real window only popped in at deactivate.
+  **Only tiles on the live desktop hand off to a real window — on open those on the active
+  workspace (or active scratchpad) shrink in from their real geometry, on close those landing
+  on the committed `m_workspace` glide out to it; every other tile is `Tile::fades`**
+  (`onLiveDesktop`) — frozen at its slot (`natural == target`) with its alpha following the
+  chrome (in on open, out on close), queued *under* the handoff set (`renderMainWindows` /
+  `renderPreviews` draw fading tiles first, `drawPreviewTile` fades the backing). Without
+  this, a maximized window on each of two workspaces shares one real rect, so the later-drawn
+  tile — the *other* workspace's window — popped over the active one for the whole open glide
+  and expanded over the picked one on close, until the real window appeared at deactivate.
 - **`addWorkspace()`** (the `+`/empty card): a brand-new empty workspace is reaped within a
   frame or two unless focused, so it is held `setPersistent(true)` (tracked in `m_newWs`) for
   the overview's lifetime and released on `deactivate()`/`close()`/dtor.

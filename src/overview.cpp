@@ -858,6 +858,17 @@ void Overview::open() {
 
     layoutTiles();
 
+    // Expo: a window on another workspace is not on the desktop the overlay opens over, so its
+    // tile must not fly in from its real geometry — a maximized window there shares the active
+    // window's rect and, drawn later, popped OVER it for the whole open glide (the wrong window
+    // seemed to shrink into the grid). It fades in at its slot instead; close() does the mirror.
+    for (auto& t : m_tiles) {
+        if (const auto w = t.win.lock(); w && !onLiveDesktop(w, m, m->m_activeWorkspace)) {
+            t.fades   = true;
+            t.natural = t.target;
+        }
+    }
+
     // seed keyboard selection on the focused window (else first tile) for arrow-nav/Enter.
     m_selected = m_tiles.empty() ? -1 : 0;
     if (const auto fw = Desktop::focusState()->window()) {
@@ -910,7 +921,8 @@ void Overview::close() {
     // shares the very same rect, so the later-drawn tile (the OTHER workspace's window)
     // expanded over the picked one until deactivate() swapped the real window in. Such a
     // tile is frozen where it is (natural == target) and fades out with the chrome, queued
-    // under the landing set (renderMainWindows / drawPreviewTile).
+    // under the landing set (renderMainWindows / drawPreviewTile). open() applies the same
+    // rule in reverse to windows that are not on the desktop the overlay opens over.
     if (const auto m = m_monitor.lock()) {
         const auto dest = m_workspace.lock();
         for (size_t i = 0; i < m_tiles.size(); ++i) {
@@ -918,9 +930,8 @@ void Overview::close() {
             const auto w = t.win.lock();
             if (!w)
                 continue;
-            const auto wws = w->m_workspace;
-            t.fadeOut      = wws && wws != dest && wws != m->m_activeSpecialWorkspace;
-            if (t.fadeOut) {
+            t.fades = !onLiveDesktop(w, m, dest);
+            if (t.fades) {
                 t.natural = t.target = onScreen[i];
                 continue;
             }
@@ -1006,6 +1017,18 @@ bool Overview::tileBelongs(const PHLWINDOW& w, const PHLMONITOR& m, const PHLWOR
         return wws->m_monitor.lock() == m;
     }
     return wws == ws; // single displayed workspace (may be inactive; fine)
+}
+
+// A tile glides to/from its REAL geometry only when its window is part of the live desktop the
+// overlay hands over to: workspace `live` (the active one on open, the committed one on close)
+// or the monitor's active scratchpad. Anything else — expo lists every workspace — has no
+// on-screen window to hand off to and fades in place instead (Tile::fades). A workspace-less
+// window (mid-move) is treated as live so it keeps the plain handoff.
+bool Overview::onLiveDesktop(const PHLWINDOW& w, const PHLMONITOR& m, const PHLWORKSPACE& live) const {
+    if (!w || !m)
+        return true;
+    const auto wws = w->m_workspace;
+    return !wws || wws == live || wws == m->m_activeSpecialWorkspace;
 }
 
 void Overview::buildTiles() {
@@ -2010,9 +2033,9 @@ void Overview::drawPreviewTile(size_t i, const LRect& slot, bool lift) const {
     // pixel space, so on a fractional edge the backing is ~1px wider and peeks as a dark seam;
     // the inset keeps it under the over-covered surface.
     const LRect bb{lb.x + 1.0, lb.y + 1.0, std::max(0.0, lb.w - 2.0), std::max(0.0, lb.h - 2.0)};
-    // A tile fading out on close (see close()) takes its backing with it, else the dark slab
-    // outlives the surface and pops away on the last frame.
-    g_pHyprOpenGL->renderRect(pxb(bb, s), argb(cfgColor("plugin:gloview:preview_bg", 0xff14181f), t.fadeOut ? e : 1.0), {.round = pxr(round, s)});
+    // A fading tile (Tile::fades) takes its backing with it — in on open, out on close — else
+    // the dark slab shows up before the surface or outlives it.
+    g_pHyprOpenGL->renderRect(pxb(bb, s), argb(cfgColor("plugin:gloview:preview_bg", 0xff14181f), t.fades ? e : 1.0), {.round = pxr(round, s)});
 
     // desktop (canvas) mode: a "✕" close button in the top-right of every preview.
     if (m_desktopMode && !lift) {
@@ -2114,13 +2137,13 @@ LRect Overview::dragBox() const {
 
 void Overview::renderPreviews() const {
     const int dragIdx = (m_dragging && m_pressTile >= 0 && m_pressTile < static_cast<int>(m_tiles.size())) ? m_pressTile : -1;
-    // Tiles fading out on close go first, so the landing set paints over them (same order as
+    // Fading tiles (Tile::fades) go first, so the handoff set paints over them (same order as
     // renderMainWindows).
     for (const bool fading : {true, false})
         for (size_t i = 0; i < m_tiles.size(); ++i) {
             if (static_cast<int>(i) == dragIdx)
                 continue; // the dragged tile floats over the strip; drawn later in renderDragTile()
-            if (m_tiles[i].fadeOut != fading)
+            if (m_tiles[i].fades != fading)
                 continue;
             drawPreviewTile(i, currentBox(m_tiles[i], static_cast<int>(i)), false);
         }
@@ -2136,9 +2159,9 @@ void Overview::renderMainWindows() const {
     // At progress 0, currentBox == t.natural == the real window's settled geometry, so the
     // opaque preview overlays it pixel-perfect. Fading with `e` would flicker the close tail:
     // preview alpha hits 0 while the real window is still hidden → desktop shows through.
-    // The one exception is a tile close() marked fadeOut: its window will NOT be on the desktop
-    // we land on, so there is no real window to hand over to. It fades with the chrome, frozen
-    // in place, and is queued FIRST so the landing tiles paint over it.
+    // The one exception is a Tile::fades tile (set by open()/close()): its window is not on the
+    // live desktop, so there is no real window to hand off to or from. It follows the chrome's
+    // alpha, frozen in place, and is queued FIRST so the handoff tiles paint over it.
     const int    dragIdx = (m_dragging && m_pressTile >= 0 && m_pressTile < static_cast<int>(m_tiles.size())) ? m_pressTile : -1;
     const double scale   = m->m_scale;
     const double e       = eased();
@@ -2146,7 +2169,7 @@ void Overview::renderMainWindows() const {
     const auto   when    = Time::steadyNow();
     for (const bool fading : {true, false})
         for (size_t i = 0; i < m_tiles.size(); ++i) {
-            if (static_cast<int>(i) == dragIdx || m_tiles[i].fadeOut != fading)
+            if (static_cast<int>(i) == dragIdx || m_tiles[i].fades != fading)
                 continue;
             const auto w = m_tiles[i].win.lock();
             if (!w || !w->m_isMapped || w->isHidden())

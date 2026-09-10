@@ -123,10 +123,12 @@ class Overview {
         LRect                snapSource; // window's frozen position when its snapshot was taken; crop source
         SP<Render::ITexture> label;   // cached window title, shown on hover
         bool                 captured = false; // snapshot was (re)taken THIS session; guards stale persistent FBs
-        // Set by close(): the window is NOT part of the desktop the overlay lands on (expo: it
-        // lives on another workspace). The tile is frozen at its on-screen box and faded out
-        // UNDER the landing tiles instead of gliding to a real geometry it will not occupy.
-        bool                 fadeOut = false;
+        // The window is NOT on the live desktop the overlay hands over to/from (expo: it lives
+        // on another workspace), so there is no real window for its tile to fly out of on open
+        // or land on at close. Set by open()/close(): the tile is frozen at its slot and its
+        // alpha follows the chrome (fades in on open, out on close), drawn UNDER the handoff
+        // tiles. See onLiveDesktop().
+        bool                 fades = false;
     };
 
     struct StripWin {
@@ -292,6 +294,7 @@ class Overview {
     int    resolveNewId(int wanted) const; // the id a create-on-use card advertised, unless it got taken meanwhile
     bool   showAllWorkspaces() const; // effective expo state: runtime override (m_allOverride) else plugin:gloview:show_all_workspaces
     bool   tileBelongs(const PHLWINDOW& w, const PHLMONITOR& m, const PHLWORKSPACE& ws) const; // shared main-area membership test (buildTiles + syncTiles MUST agree)
+    bool   onLiveDesktop(const PHLWINDOW& w, const PHLMONITOR& m, const PHLWORKSPACE& live) const; // window is on the desktop the overlay hands over to/from (else Tile::fades)
     void   buildTiles();
     void   buildStrip();
     void   layoutTiles();
