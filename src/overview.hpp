@@ -264,7 +264,6 @@ class Overview {
     CHyprSignalListener m_keyL;
     CFunctionHook*      m_shouldRenderHook = nullptr;
     CFunctionHook*      m_shouldRenderWindowHook = nullptr; // one-arg shouldRenderWindow, used by makeSnapshot()
-    CFunctionHook*      m_saveBufferForMirrorHook = nullptr; // dual-view no_screen_share blackout after mirror copy
 
     // config helpers
     int           cfgInt(const char* name, int fallback) const;

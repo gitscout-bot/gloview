@@ -235,8 +235,10 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     addColor("plugin:gloview:close_button_color", Config::INTEGER{0xe6e23b3bLL}); // desktop-mode "✕" close button fill
 
     // --- bar / layer-shell hiding (waybar, quickshell-based bars, …) ---
-    // --- screen-share privacy (Hyprland noscreenshare / no_screen_share) ---
-    addInt("plugin:gloview:no_screen_share", Config::INTEGER{1}); // black out overview on screencopy/share (local keeps live tiles; see README)
+    // no_screen_share: kept as a documented no-op (default 0). Dual-view share-mirror
+    // blackout was reverted — saveBufferForMirror + bindTempFB/glClear ABRT'd on
+    // NVIDIA / Hyprland 83cf6a6. Do not reintroduce GL screenshare privacy here.
+    addInt("plugin:gloview:no_screen_share", Config::INTEGER{0}); // NO-OP (see README / TODO)
 
     addInt("plugin:gloview:hide_top_layers", Config::INTEGER{0});     // fade out Top layer surfaces (bars) while the overview is up
     addInt("plugin:gloview:hide_overlay_layers", Config::INTEGER{0}); // fade out Overlay layer surfaces (popups/notifications)
