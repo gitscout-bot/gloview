@@ -19,6 +19,7 @@
 #include <hyprland/src/state/WorkspaceState.hpp>
 #include <hyprland/src/managers/fullscreen/FullscreenController.hpp>
 #include <hyprland/src/desktop/view/window/Window.hpp>
+#include <hyprland/src/desktop/view/window/WindowPresentation.hpp>
 #include <hyprland/src/desktop/view/window/WindowMetadata.hpp>
 #include <hyprland/src/desktop/view/window/WindowBackend.hpp>
 #include <hyprland/src/desktop/view/LayerSurface.hpp>
