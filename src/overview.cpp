@@ -42,6 +42,8 @@
 #include <hyprland/src/render/pass/PassElement.hpp>
 #include <hyprland/src/render/pass/SurfacePassElement.hpp>
 #include <hyprland/src/render/pass/RendererHintsPassElement.hpp>
+#include <hyprland/src/render/pass/RectPassElement.hpp>
+#include <hyprland/src/helpers/Color.hpp>
 #include <hyprland/src/protocols/core/Compositor.hpp>
 #include <hyprland/src/desktop/view/WLSurface.hpp>
 #include <hyprutils/utils/ScopeGuard.hpp>
@@ -228,6 +230,20 @@ void fixFractionalScaleUV(const SP<CWLSurfaceResource>& surface, const PHLMONITO
         uvMax -= misalignment / bufferSize;
 }
 
+// Hyprland only blacks `noscreenshare` / `no_screen_share` windows at their real box during
+// screencopy. Overview previews blit the live surface elsewhere, so without this check those
+// tiles would leak into the share. Honour the same m_ruleApplicator flag Hyprland uses.
+bool windowNoScreenShare(const PHLWINDOW& w) {
+    return w && w->m_ruleApplicator && w->m_ruleApplicator->noScreenShare().valueOrDefault();
+}
+
+bool honorNoScreenShare() {
+    const auto it = g_config.ints.find("plugin:gloview:no_screen_share");
+    if (it == g_config.ints.end() || !it->second)
+        return true;
+    return static_cast<int>(it->second->value()) != 0;
+}
+
 // Render a window's LIVE surface tree scaled into `destPx`, clipped to `clipPx`
 // (both monitor PIXEL coords) via real CSurfacePassElements. No crop rect to drift,
 // so immune to snapshots' stale/mis-cropped tiles; works on hidden workspaces.
@@ -237,6 +253,20 @@ void renderWindowLive(const PHLWINDOW& w, const PHLMONITOR& mon, const CBox& des
         return;
     if (!(destPx.w > 0 && destPx.h > 0))
         return;
+
+    // Match Hyprland noscreenshare: paint solid black instead of the live surface so
+    // screencopy cannot read private window contents through overview tiles.
+    if (honorNoScreenShare() && windowNoScreenShare(w)) {
+        const double roundPx = roundSlotPx > 0.0 ? roundSlotPx * mon->m_scale : 0.0;
+        g_pHyprRenderer->m_renderPass.add(makeUnique<CRectPassElement>(CRectPassElement::SRectData{
+            .box           = destPx,
+            .color         = CHyprColor{0.F, 0.F, 0.F, std::clamp(alpha, 0.F, 1.F)},
+            .round         = static_cast<int>(roundPx),
+            .roundingPower = w->presentation().roundingPower(),
+            .clipBox       = clipPx,
+        }));
+        return;
+    }
 
     // When reported size > committed buffer (CWLSurface::small(): X11 size hints/mid-resize),
     // getTexBox CENTERS it at real size, leaving an uncovered margin. m_fillIgnoreSmall
@@ -1349,6 +1379,9 @@ void Overview::captureSnapshots() {
     // Only snapshot presentable windows: a window mid-move/resize can be transiently
     // unmapped/workspace-less, and makeSnapshot then null-derefs the surface → crash.
     const auto snap = [this](const PHLWINDOW& w) -> bool {
+        // Never snapshot noscreenshare windows — the FB would still hold private pixels.
+        if (honorNoScreenShare() && windowNoScreenShare(w))
+            return false;
         if (w && w->mapped() && w->m_workspace && !w->isHidden()) {
             const auto     ws          = w->m_workspace;
             const bool     wsVis       = ws->visible();
