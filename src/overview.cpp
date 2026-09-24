@@ -6,6 +6,7 @@
 #include <cmath>
 #include <unordered_set>
 #include <utility>
+#include <exception>
 
 #include <hyprland/src/Compositor.hpp>
 #include <hyprland/src/layout/LayoutManager.hpp>
@@ -36,6 +37,7 @@
 #include <hyprland/src/helpers/time/Time.hpp>
 #include <hyprland/src/config/shared/complex/ComplexDataTypes.hpp>
 #include <hyprland/src/render/OpenGL.hpp>
+#include <GLES3/gl32.h>
 #include <hyprland/src/render/Renderer.hpp>
 #include <hyprland/src/render/Texture.hpp>
 #include <hyprland/src/render/Framebuffer.hpp>
@@ -43,7 +45,6 @@
 #include <hyprland/src/render/pass/SurfacePassElement.hpp>
 #include <hyprland/src/render/pass/RendererHintsPassElement.hpp>
 #include <hyprland/src/render/pass/RectPassElement.hpp>
-#include <hyprland/src/render/pass/ClearPassElement.hpp>
 #include <hyprland/src/managers/screenshare/ScreenshareManager.hpp>
 #include <hyprland/src/helpers/Color.hpp>
 #include <hyprland/src/protocols/core/Compositor.hpp>
@@ -235,7 +236,14 @@ void fixFractionalScaleUV(const SP<CWLSurfaceResource>& surface, const PHLMONITO
 // plugin:gloview:no_screen_share — hide overview content from *screencopy / screen-share*
 // captures only. Local interactive frames keep live previews (including noscreenshare
 // windows). Hyprland feeds shares from the monitor mirror FB (see saveBufferForMirror /
-// ScreenshareFrame::renderMonitor); we clear that mirror after the local frame is done.
+// ScreenshareFrame::renderMonitor).
+//
+// Dual-view (local overview + share black) requires clearing that mirror *after*
+// saveBufferForMirror copies the overview-containing frame into it, while the GL
+// context is still current inside OpenGL::end(). RENDER_POST is documented as
+// "gl context not available anymore" — remaking EGL / bindTempFB there abort()s
+// Hyprland (std::unexpected from an escaping exception). We therefore hook
+// saveBufferForMirror and black out immediately after the original returns.
 bool honorNoScreenShare() {
     const auto it = g_config.ints.find("plugin:gloview:no_screen_share");
     if (it == g_config.ints.end() || !it->second)
@@ -245,42 +253,55 @@ bool honorNoScreenShare() {
 
 // True when this output has an active monitor/region screenshare session (Discord, demka, …).
 bool monitorBeingScreenShared(const PHLMONITOR& mon) {
-    if (!mon)
+    try {
+        if (!mon)
+            return false;
+        auto& mgr = Screenshare::mgr();
+        return mgr && mgr->isOutputBeingSSd(mon);
+    } catch (...) {
         return false;
-    auto& mgr = Screenshare::mgr();
-    return mgr && mgr->isOutputBeingSSd(mon);
+    }
 }
 
-// After saveBufferForMirror (in endRender), paint the screenshare mirror FB solid black.
-// Local swapchain already has the live overview; share clients read the mirror.
+// Called from the saveBufferForMirror hook — GL context is already current mid OpenGL::end.
+// Uses glClear only (no makeEGLCurrent / startRenderPass / projection mutation) so we do
+// not disturb the subsequent mainFB → outFB composite that still has the live overview.
 void blackoutScreenshareMirror(const PHLMONITOR& mon) {
-    if (!mon || !g_pHyprRenderer || !g_pHyprOpenGL)
-        return;
-    const auto res = mon->resources().lock();
-    if (!res || !res->hasMirrorFB())
-        return;
-    const auto fb = res->mirrorFB();
-    if (!fb || !fb->isAllocated())
-        return;
+    try {
+        if (!mon || !g_pHyprRenderer || !g_pHyprOpenGL)
+            return;
+        const auto res = mon->resources().lock();
+        if (!res || !res->hasMirrorFB())
+            return;
+        const auto fb = res->mirrorFB();
+        if (!fb || !fb->isAllocated())
+            return;
 
-    g_pHyprOpenGL->makeEGLCurrent();
-
-    const auto prevMon = g_pHyprRenderer->m_renderData.pMonitor;
-    g_pHyprRenderer->m_renderData.pMonitor = mon;
-
-    const Vector2D sz = mon->m_transformedSize;
-    g_pHyprRenderer->m_renderData.fbSize = sz;
-    g_pHyprRenderer->setProjectionType(Render::RPT_EXPORT);
-    g_pHyprRenderer->setViewport(0, 0, static_cast<int>(sz.x), static_cast<int>(sz.y));
-
-    {
         auto guard = g_pHyprRenderer->bindTempFB(fb);
-        g_pHyprRenderer->startRenderPass();
-        const CRegion full{CBox{0, 0, sz.x, sz.y}};
-        g_pHyprRenderer->draw(CClearPassElement::SClearData{.color = Colors::BLACK}, full);
+        glClearColor(0.f, 0.f, 0.f, 1.f);
+        glClear(GL_COLOR_BUFFER_BIT);
+    } catch (const std::exception& e) {
+        LOG(Log::ERR, "[gloview] no_screen_share mirror blackout failed: {}", e.what());
+    } catch (...) {
+        LOG(Log::ERR, "[gloview] no_screen_share mirror blackout failed (unknown)");
     }
+}
 
-    g_pHyprRenderer->m_renderData.pMonitor = prevMon;
+bool shouldBlackoutShareMirrorNow() {
+    try {
+        if (!g_overview || !g_overview->active())
+            return false;
+        if (!honorNoScreenShare())
+            return false;
+        if (!g_pHyprRenderer)
+            return false;
+        const auto mon = g_pHyprRenderer->m_renderData.pMonitor.lock();
+        if (!mon || mon != g_overview->monitor())
+            return false;
+        return monitorBeingScreenShared(mon);
+    } catch (...) {
+        return false;
+    }
 }
 
 // Render a window's LIVE surface tree scaled into `destPx`, clipped to `clipPx`
@@ -408,8 +429,10 @@ void renderWindowLive(const PHLWINDOW& w, const PHLMONITOR& mon, const CBox& des
 
 using PSHOULDRENDER              = bool (*)(void*, PHLWINDOW, PHLMONITOR);
 using PSHOULDRENDERWINDOW        = bool (*)(void*, PHLWINDOW);
-PSHOULDRENDER       g_shouldRenderOrig       = nullptr;
-PSHOULDRENDERWINDOW g_shouldRenderWindowOrig = nullptr;
+using PSAVEBUFFERFORMIRROR       = bool (*)(void*, const CBox&);
+PSHOULDRENDER         g_shouldRenderOrig         = nullptr;
+PSHOULDRENDERWINDOW   g_shouldRenderWindowOrig   = nullptr;
+PSAVEBUFFERFORMIRROR  g_saveBufferForMirrorOrig  = nullptr;
 
 bool hkShouldRenderWindow(void* thisptr, PHLWINDOW window, PHLMONITOR monitor) {
     if (g_overview) {
@@ -427,6 +450,31 @@ bool hkShouldRenderWindowAny(void* thisptr, PHLWINDOW window) {
     if (g_overview && g_overview->forceRenderWindow(window))
         return true;
     return g_shouldRenderWindowOrig ? g_shouldRenderWindowOrig(thisptr, window) : true;
+}
+
+// Runs inside OpenGL::end after the overview has already been drawn into mainFB and
+// copied into the screenshare mirror. Clearing the mirror here blacks the share while
+// the subsequent mainFB → swapchain blit still carries the live overview for the user.
+bool hkSaveBufferForMirror(void* thisptr, const CBox& box) {
+    bool ok = false;
+    try {
+        ok = g_saveBufferForMirrorOrig ? g_saveBufferForMirrorOrig(thisptr, box) : false;
+    } catch (...) {
+        // Never let a plugin exception escape into Hyprland's render path (ABRT).
+        LOG(Log::ERR, "[gloview] saveBufferForMirror original threw; skipping blackout");
+        return false;
+    }
+    if (!ok)
+        return false;
+    try {
+        if (shouldBlackoutShareMirrorNow()) {
+            const auto mon = g_pHyprRenderer->m_renderData.pMonitor.lock();
+            blackoutScreenshareMirror(mon);
+        }
+    } catch (...) {
+        LOG(Log::ERR, "[gloview] saveBufferForMirror blackout path threw; continuing");
+    }
+    return ok;
 }
 
 CHyprColor argb(Hyprlang::INT raw, double alphaMul = 1.0) {
@@ -535,8 +583,13 @@ Overview::~Overview() {
         HyprlandAPI::removeFunctionHook(m_handle, m_shouldRenderWindowHook);
         m_shouldRenderWindowHook = nullptr;
     }
-    g_shouldRenderOrig       = nullptr;
-    g_shouldRenderWindowOrig = nullptr;
+    if (m_saveBufferForMirrorHook) {
+        HyprlandAPI::removeFunctionHook(m_handle, m_saveBufferForMirrorHook);
+        m_saveBufferForMirrorHook = nullptr;
+    }
+    g_shouldRenderOrig         = nullptr;
+    g_shouldRenderWindowOrig   = nullptr;
+    g_saveBufferForMirrorOrig  = nullptr;
 }
 
 bool Overview::initialize() {
@@ -609,6 +662,44 @@ bool Overview::initialize() {
         return false;
     }
     g_shouldRenderWindowOrig = reinterpret_cast<PSHOULDRENDERWINDOW>(m_shouldRenderWindowHook->m_original);
+
+    // Optional: dual-view no_screen_share blackout. Failure here must NOT fail plugin init —
+    // overview still works; share simply sees the overview until the hook can be installed.
+    m_saveBufferForMirrorHook = nullptr;
+    g_saveBufferForMirrorOrig = nullptr;
+    {
+        const auto mirrorMatches = HyprlandAPI::findFunctionsByName(m_handle, "saveBufferForMirror");
+        void*      mirrorAddr    = nullptr;
+        for (const auto& mt : mirrorMatches) {
+            // Prefer the non-.cold OpenGL impl; demangled contains saveBufferForMirror(
+            if (mt.demangled.find("saveBufferForMirror(") == std::string::npos)
+                continue;
+            if (mt.demangled.find(".cold") != std::string::npos)
+                continue;
+            mirrorAddr = mt.address;
+            break;
+        }
+        if (!mirrorAddr) {
+            HyprlandAPI::addNotification(m_handle,
+                "[gloview] saveBufferForMirror not found — no_screen_share dual-view blackout disabled",
+                CHyprColor(1.0, 0.6, 0.2, 1.0), 6000);
+        } else {
+            m_saveBufferForMirrorHook =
+                HyprlandAPI::createFunctionHook(m_handle, mirrorAddr, reinterpret_cast<void*>(&hkSaveBufferForMirror));
+            if (!m_saveBufferForMirrorHook || !m_saveBufferForMirrorHook->hook()) {
+                HyprlandAPI::addNotification(m_handle,
+                    "[gloview] failed to hook saveBufferForMirror — no_screen_share dual-view blackout disabled",
+                    CHyprColor(1.0, 0.6, 0.2, 1.0), 6000);
+                if (m_saveBufferForMirrorHook) {
+                    HyprlandAPI::removeFunctionHook(m_handle, m_saveBufferForMirrorHook);
+                    m_saveBufferForMirrorHook = nullptr;
+                }
+            } else {
+                g_saveBufferForMirrorOrig =
+                    reinterpret_cast<PSAVEBUFFERFORMIRROR>(m_saveBufferForMirrorHook->m_original);
+            }
+        }
+    }
     return true;
 }
 
@@ -1775,14 +1866,11 @@ void Overview::renderStage(eRenderStage stage) {
     if (!m)
         return;
 
-    // RENDER_POST: GL context was torn down for the *local* frame, but EGL can be remade.
-    // Hyprland has already copied this frame into the screenshare mirror FB — clear that
-    // mirror so Discord/demka see solid black while the user still saw the live overview.
-    if (stage == RENDER_POST) {
-        if (honorNoScreenShare() && monitorBeingScreenShared(m))
-            blackoutScreenshareMirror(m);
+    // RENDER_POST: GL context is gone (SharedDefs: "gl context not available anymore").
+    // Dual-view blackout runs from the saveBufferForMirror hook instead — do not remake
+    // EGL / bindTempFB here (that path abort()s Hyprland).
+    if (stage == RENDER_POST)
         return;
-    }
 
     const auto rm = g_pHyprRenderer->m_renderData.pMonitor.lock();
     // RENDER_LAST_MOMENT is after the top/overlay layers (bars), so the overview paints
