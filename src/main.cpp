@@ -236,7 +236,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
 
     // --- bar / layer-shell hiding (waybar, quickshell-based bars, …) ---
     // --- screen-share privacy (Hyprland noscreenshare / no_screen_share) ---
-    addInt("plugin:gloview:no_screen_share", Config::INTEGER{1}); // black out noscreenshare window previews (see README)
+    addInt("plugin:gloview:no_screen_share", Config::INTEGER{1}); // black out overview on screencopy/share (local keeps live tiles; see README)
 
     addInt("plugin:gloview:hide_top_layers", Config::INTEGER{0});     // fade out Top layer surfaces (bars) while the overview is up
     addInt("plugin:gloview:hide_overlay_layers", Config::INTEGER{0}); // fade out Overlay layer surfaces (popups/notifications)

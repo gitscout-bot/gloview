@@ -43,6 +43,8 @@
 #include <hyprland/src/render/pass/SurfacePassElement.hpp>
 #include <hyprland/src/render/pass/RendererHintsPassElement.hpp>
 #include <hyprland/src/render/pass/RectPassElement.hpp>
+#include <hyprland/src/render/pass/ClearPassElement.hpp>
+#include <hyprland/src/managers/screenshare/ScreenshareManager.hpp>
 #include <hyprland/src/helpers/Color.hpp>
 #include <hyprland/src/protocols/core/Compositor.hpp>
 #include <hyprland/src/desktop/view/WLSurface.hpp>
@@ -230,18 +232,55 @@ void fixFractionalScaleUV(const SP<CWLSurfaceResource>& surface, const PHLMONITO
         uvMax -= misalignment / bufferSize;
 }
 
-// Hyprland only blacks `noscreenshare` / `no_screen_share` windows at their real box during
-// screencopy. Overview previews blit the live surface elsewhere, so without this check those
-// tiles would leak into the share. Honour the same m_ruleApplicator flag Hyprland uses.
-bool windowNoScreenShare(const PHLWINDOW& w) {
-    return w && w->m_ruleApplicator && w->m_ruleApplicator->noScreenShare().valueOrDefault();
-}
-
+// plugin:gloview:no_screen_share — hide overview content from *screencopy / screen-share*
+// captures only. Local interactive frames keep live previews (including noscreenshare
+// windows). Hyprland feeds shares from the monitor mirror FB (see saveBufferForMirror /
+// ScreenshareFrame::renderMonitor); we clear that mirror after the local frame is done.
 bool honorNoScreenShare() {
     const auto it = g_config.ints.find("plugin:gloview:no_screen_share");
     if (it == g_config.ints.end() || !it->second)
         return true;
     return static_cast<int>(it->second->value()) != 0;
+}
+
+// True when this output has an active monitor/region screenshare session (Discord, demka, …).
+bool monitorBeingScreenShared(const PHLMONITOR& mon) {
+    if (!mon)
+        return false;
+    auto& mgr = Screenshare::mgr();
+    return mgr && mgr->isOutputBeingSSd(mon);
+}
+
+// After saveBufferForMirror (in endRender), paint the screenshare mirror FB solid black.
+// Local swapchain already has the live overview; share clients read the mirror.
+void blackoutScreenshareMirror(const PHLMONITOR& mon) {
+    if (!mon || !g_pHyprRenderer || !g_pHyprOpenGL)
+        return;
+    const auto res = mon->resources().lock();
+    if (!res || !res->hasMirrorFB())
+        return;
+    const auto fb = res->mirrorFB();
+    if (!fb || !fb->isAllocated())
+        return;
+
+    g_pHyprOpenGL->makeEGLCurrent();
+
+    const auto prevMon = g_pHyprRenderer->m_renderData.pMonitor;
+    g_pHyprRenderer->m_renderData.pMonitor = mon;
+
+    const Vector2D sz = mon->m_transformedSize;
+    g_pHyprRenderer->m_renderData.fbSize = sz;
+    g_pHyprRenderer->setProjectionType(Render::RPT_EXPORT);
+    g_pHyprRenderer->setViewport(0, 0, static_cast<int>(sz.x), static_cast<int>(sz.y));
+
+    {
+        auto guard = g_pHyprRenderer->bindTempFB(fb);
+        g_pHyprRenderer->startRenderPass();
+        const CRegion full{CBox{0, 0, sz.x, sz.y}};
+        g_pHyprRenderer->draw(CClearPassElement::SClearData{.color = Colors::BLACK}, full);
+    }
+
+    g_pHyprRenderer->m_renderData.pMonitor = prevMon;
 }
 
 // Render a window's LIVE surface tree scaled into `destPx`, clipped to `clipPx`
@@ -253,20 +292,6 @@ void renderWindowLive(const PHLWINDOW& w, const PHLMONITOR& mon, const CBox& des
         return;
     if (!(destPx.w > 0 && destPx.h > 0))
         return;
-
-    // Match Hyprland noscreenshare: paint solid black instead of the live surface so
-    // screencopy cannot read private window contents through overview tiles.
-    if (honorNoScreenShare() && windowNoScreenShare(w)) {
-        const double roundPx = roundSlotPx > 0.0 ? roundSlotPx * mon->m_scale : 0.0;
-        g_pHyprRenderer->m_renderPass.add(makeUnique<CRectPassElement>(CRectPassElement::SRectData{
-            .box           = destPx,
-            .color         = CHyprColor{0.F, 0.F, 0.F, std::clamp(alpha, 0.F, 1.F)},
-            .round         = static_cast<int>(roundPx),
-            .roundingPower = w->presentation().roundingPower(),
-            .clipBox       = clipPx,
-        }));
-        return;
-    }
 
     // When reported size > committed buffer (CWLSurface::small(): X11 size hints/mid-resize),
     // getTexBox CENTERS it at real size, leaving an uncovered margin. m_fillIgnoreSmall
@@ -1379,9 +1404,6 @@ void Overview::captureSnapshots() {
     // Only snapshot presentable windows: a window mid-move/resize can be transiently
     // unmapped/workspace-less, and makeSnapshot then null-derefs the surface → crash.
     const auto snap = [this](const PHLWINDOW& w) -> bool {
-        // Never snapshot noscreenshare windows — the FB would still hold private pixels.
-        if (honorNoScreenShare() && windowNoScreenShare(w))
-            return false;
         if (w && w->mapped() && w->m_workspace && !w->isHidden()) {
             const auto     ws          = w->m_workspace;
             const bool     wsVis       = ws->visible();
@@ -1748,11 +1770,24 @@ void Overview::renderStage(eRenderStage stage) {
     // this guard we'd re-add the overlay pass mid-snapshot → reentrant render → SEGV.
     if (m_capturing)
         return;
+
+    const auto m = m_monitor.lock();
+    if (!m)
+        return;
+
+    // RENDER_POST: GL context was torn down for the *local* frame, but EGL can be remade.
+    // Hyprland has already copied this frame into the screenshare mirror FB — clear that
+    // mirror so Discord/demka see solid black while the user still saw the live overview.
+    if (stage == RENDER_POST) {
+        if (honorNoScreenShare() && monitorBeingScreenShared(m))
+            blackoutScreenshareMirror(m);
+        return;
+    }
+
     const auto rm = g_pHyprRenderer->m_renderData.pMonitor.lock();
-    const auto m  = m_monitor.lock();
     // RENDER_LAST_MOMENT is after the top/overlay layers (bars), so the overview paints
     // over them instead of the bar bleeding on top.
-    if (!rm || !m || rm != m)
+    if (!rm || rm != m)
         return;
 
     if (stage != RENDER_LAST_MOMENT)

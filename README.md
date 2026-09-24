@@ -161,7 +161,7 @@ All keys live under `plugin:gloview:*`. Colors are `0xAARRGGBB` integers.
 | `switch_on_drop` | bool (0/1) | `0` | Dropping a window on a card also follows it to that workspace |
 | `switch_on_new_workspace` | bool (0/1) | `1` | Clicking `+` follows the display to the new workspace |
 | `close_button_color` | color | `0xe6e23b3b` | Desktop-mode `✕` close-button fill |
-| `no_screen_share` | bool (0/1) | `1` | Honour Hyprland `noscreenshare` / `no_screen_share` window rules: draw those windows' overview previews as solid black (and skip snapshotting them) so screencopy cannot leak their contents through tiles. The overview is compositor-drawn, not a layer surface, so it cannot be `layerrule`'d — this is the plugin-side equivalent |
+| `no_screen_share` | bool (0/1) | `1` | When a screencopy / screen-share session is capturing this monitor, paint the share mirror solid black while the overview is open (local monitor still shows live tiles). Detects an active session via `Screenshare::mgr()->isOutputBeingSSd(monitor)` and clears that monitor's screenshare mirror FB on `RENDER_POST`. The overview is compositor-drawn, not a layer surface, so it cannot be `layerrule`'d — this is the plugin-side equivalent |
 | `hide_top_layers` | bool (0/1) | `0` | Fade out Top layer surfaces (bars, e.g. Waybar) while open |
 | `hide_overlay_layers` | bool (0/1) | `0` | Fade out Overlay layer surfaces (popups/notifications) while open |
 | `above_namespaces` | string | `""` | Comma/space list of layer namespaces to draw *above* the overview (trailing `*` glob; a namespace containing `aboveoverview` always qualifies) |
@@ -230,7 +230,7 @@ supersedes the older `bar_position` (top/bottom only); set `anchor` and it wins.
                 switch_on_drop          = 0,
                 switch_on_new_workspace = 1,
 
-                no_screen_share     = 1,  -- black out noscreenshare window previews
+                no_screen_share     = 1,  -- black out overview on demka/screen-share (local stays live)
                 hide_top_layers     = 0,
                 hide_overlay_layers = 0,
                 above_namespaces    = "",
