@@ -175,7 +175,7 @@ bool hasStablePreviewUV(const PHLWINDOW& window, const SP<CWLSurfaceResource>& s
         return false;
 
     const auto& drag = g_layoutManager->dragController();
-    if (drag && drag->target() == window->m_target && drag->mode() >= MBIND_RESIZE)
+    if (drag && drag->target() == window->layoutTarget() && drag->mode() >= MBIND_RESIZE)
         return false;
 
     const auto& state = surface->m_current;
@@ -189,10 +189,10 @@ bool hasStablePreviewUV(const PHLWINDOW& window, const SP<CWLSurfaceResource>& s
         expectedPx = (state.viewport.destination * monitor->m_scale).round();
     else if (state.viewport.hasSource)
         expectedPx = (state.viewport.source.size() * monitor->m_scale).round();
-    else if (mainSurface && window->getReportedSize() != state.size)
+    else if (mainSurface && window->backend().reportedSize() != state.size)
         expectedPx = (state.size * monitor->m_scale).round();
     else if (mainSurface)
-        expectedPx = (window->getReportedSize() * monitor->m_scale).round();
+        expectedPx = (window->backend().reportedSize() * monitor->m_scale).round();
     else
         expectedPx = texBoxPx.size();
 
@@ -263,7 +263,7 @@ void renderWindowLive(const PHLWINDOW& w, const PHLMONITOR& mon, const CBox& des
     if (!(scaleMod > 0.F))
         return;
 
-    const Vector2D logicalTL = pos + w->m_floatingOffset;
+    const Vector2D logicalTL = pos + w->presentation().floatingOffset();
     const Vector2D scaledTL  = (logicalTL - mon->m_position) * mon->m_scale;
     const Vector2D translate = destPx.pos() / scaleMod - scaledTL;
 
@@ -291,7 +291,7 @@ void renderWindowLive(const PHLWINDOW& w, const PHLMONITOR& mon, const CBox& des
     data.alpha          = std::clamp(alpha, 0.F, 1.F);
     data.decorate       = false;
     data.rounding       = roundSlotPx > 0.0 ? roundSlotPx * mon->m_scale : 0.0;
-    data.roundingPower  = w->roundingPower();
+    data.roundingPower  = w->presentation().roundingPower();
     data.blur           = false;
     data.pWindow        = w;
     data.clipBox        = clipPx;
@@ -1350,7 +1350,7 @@ void Overview::captureSnapshots() {
     const auto snap = [this](const PHLWINDOW& w) -> bool {
         if (w && w->mapped() && w->m_workspace && !w->isHidden()) {
             const auto     ws          = w->m_workspace;
-            const bool     wsVis       = ws->m_visible;
+            const bool     wsVis       = ws->visible();
             const bool     wsForce     = ws->m_forceRendering;
             // Save BOTH value AND goal: setValueAndWarp(x) also sets goal:=x, so restoring
             // only value() pins a mid-animation workspace at a stale goal. That corruption
@@ -1363,7 +1363,7 @@ void Overview::captureSnapshots() {
             // m_forceRendering is THE flag makeSnapshot honours to paint a window on a
             // non-active workspace; without it the window renders empty → black/blank thumb.
             // Only WARP (never assign the goal), else the goal thrash corrupts the workspace.
-            ws->m_visible        = true;
+            ws->setVisible(true);
             ws->m_forceRendering = true;
             ws->m_renderOffset->setValueAndWarp(Vector2D{});
             ws->m_alpha->setValueAndWarp(1.0F);
@@ -1382,7 +1382,7 @@ void Overview::captureSnapshots() {
                 m_snapFB[w.get()] = fb;
             m_captureWin.reset();
 
-            ws->m_visible        = wsVis;
+            ws->setVisible(wsVis);
             ws->m_forceRendering = wsForce;
             // Warp back to the captured value, then re-aim at the original goal so an
             // in-flight slide resumes to its true destination (operator= no-ops if settled).
@@ -2337,7 +2337,7 @@ void Overview::renderAboveLayers() const {
     for (int idx : {2, 3}) {
         for (const auto& ref : m->m_layerSurfaceLayers[idx]) {
             const auto ls = ref.lock();
-            if (!ls || !ls->m_mapped || !ls->wlSurface() || !ls->wlSurface()->resource())
+            if (!ls || !ls->mapped() || !ls->wlSurface() || !ls->wlSurface()->resource())
                 continue;
             if (!isAboveLayer(ls->m_namespace))
                 continue;
