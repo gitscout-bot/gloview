@@ -2,13 +2,12 @@
   description = "GloView — a macOS Mission Control-style overview plugin for Hyprland";
 
   inputs = {
-    # Pin a tagged Hyprland release, not `main`: ABI must match the compositor, and main's
-    # dep tree is intermittently unbuildable (e.g. a missing pango buildInput in
-    # hyprland-guiutils broke it on 2026-06-27). v0.56.2 is the version this targets: 0.56
-    # dropped CWindow::m_snapshotFB, so the plugin owns the snapshot framebuffers itself and
-    # will not compile against 0.55.x. Downstream should set `inputs.hyprland.follows` to
-    # build the plugin against THEIR exact Hyprland.
-    hyprland.url = "github:hyprwm/Hyprland?ref=v0.56.2";
+    # Pin Hyprland to the compositor ABI this fork targets. Commit 83cf6a6 (reported as
+    # v0.56.0-style / nix build ABI 83cf6a6…_aq_0.15_…) inlined State::workspaceState() and
+    # refactored workspace create/query onto State::Workspace::CState. Downstream MUST set
+    # `inputs.gloview.inputs.hyprland.follows = "hyprland"` so the plugin links against the
+    # EXACT same Hyprland as the running compositor.
+    hyprland.url = "github:hyprwm/Hyprland?rev=83cf6a6ed540dc37808434259c6a3ba663de9616";
     nixpkgs.follows = "hyprland/nixpkgs";
     systems.follows = "hyprland/systems";
   };

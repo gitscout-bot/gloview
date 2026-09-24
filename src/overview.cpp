@@ -18,9 +18,13 @@
 #include <hyprland/src/state/MonitorState.hpp>
 #include <hyprland/src/state/WorkspaceState.hpp>
 #include <hyprland/src/managers/fullscreen/FullscreenController.hpp>
-#include <hyprland/src/desktop/view/Window.hpp>
+#include <hyprland/src/desktop/view/window/Window.hpp>
+#include <hyprland/src/desktop/view/window/WindowMetadata.hpp>
+#include <hyprland/src/desktop/view/window/WindowBackend.hpp>
 #include <hyprland/src/desktop/view/LayerSurface.hpp>
-#include <hyprland/src/desktop/Workspace.hpp>
+#include <hyprland/src/workspace/HLWorkspace.hpp>
+#include <hyprland/src/workspace/RegularWorkspace.hpp>
+#include "hypr_compat.hpp"
 #include <hyprland/src/event/EventBus.hpp>
 #include <hyprland/src/helpers/Color.hpp>
 #include <hyprland/src/managers/input/InputManager.hpp>
@@ -174,7 +178,7 @@ bool hasStablePreviewUV(const PHLWINDOW& window, const SP<CWLSurfaceResource>& s
         return false;
 
     const auto& state = surface->m_current;
-    if (window->m_isX11 && state.viewport.hasSource)
+    if (window->backend().isX11() && state.viewport.hasSource)
         return false;
     if (texBoxLogical.size() != state.size)
         return false;
@@ -452,7 +456,7 @@ Overview::~Overview() {
     restoreLayers(); // never leave a bar stuck at alpha 0 if we're torn down mid-hide
     restoreFill();   // never leave a window's surface stuck stretching its small buffer
     if (const auto ws = m_newWs.lock()) // don't leak a persistent workspace either
-        ws->setPersistent(false);
+        wsSetPersistent(ws, false);
     m_newWs.reset();
     m_tiles.clear();
     m_strip.clear();
@@ -639,7 +643,7 @@ void Overview::autodeleteEmpty() {
     // Copy, not the live view: setPersistent(false) can drop the last ref and destroy the
     // workspace mid-iteration.
     for (const auto& ws : State::workspaceState()->workspacesCopy()) {
-        if (!ws || ws->m_isSpecialWorkspace || ws->m_id <= 0) // leave scratchpads and named (-1337…) workspaces alone
+        if (!ws || !wsIsNumberedPositive(ws)) // leave scratchpads and named (-1337…) workspaces alone
             continue;
         if (ws->m_monitor.lock() != m) // only this monitor's — other outputs aren't ours to prune
             continue;
@@ -651,15 +655,15 @@ void Overview::autodeleteEmpty() {
         // was added. Releasing it when it is genuinely abandoned is switchToWorkspace's job.
         if (ws == held)
             continue;
-        if (ws->isVisible())           // active on some monitor
+        if (ws->visible())           // active on some monitor
             continue;
         if (workspaceOccupied(ws))
             continue;
-        if (!ws->isPersistent())       // nothing pinning it; Hyprland reaps it without our help
+        if (!wsIsPersistent(ws))       // nothing pinning it; Hyprland reaps it without our help
             continue;
 
-        ws->setPersistent(false);
-        dbg("autodelete: released empty workspace " + std::to_string(ws->m_id));
+        wsSetPersistent(ws, false);
+        dbg("autodelete: released empty workspace " + std::to_string(wsNumericId(ws)));
     }
 }
 
@@ -689,7 +693,7 @@ bool Overview::workspaceOccupied(const PHLWORKSPACE& ws) const {
 
 int Overview::nextWorkspaceId() const {
     int id = 1;
-    while (State::workspaceState()->query().id(id).run())
+    while (wsQueryById(id))
         ++id;
     return id;
 }
@@ -697,7 +701,7 @@ int Overview::nextWorkspaceId() const {
 // A create-on-use card advertises the id it will take (dynamic_workspaces labels the trailing
 // card with it), so honour that id unless something claimed it between the build and the click.
 int Overview::resolveNewId(int wanted) const {
-    if (wanted > 0 && !State::workspaceState()->query().id(wanted).run())
+    if (wanted > 0 && !wsQueryById(wanted))
         return wanted;
     return nextWorkspaceId();
 }
@@ -968,7 +972,7 @@ void Overview::hardClose() {
     restoreLayers(); // never leave a bar stuck at alpha 0 if we tear down mid-hide
     restoreFill();   // never leave a window's surface stuck stretching its small buffer
     if (const auto ws = m_newWs.lock()) // don't leak a held-persistent "+"-created workspace
-        ws->setPersistent(false);
+        wsSetPersistent(ws, false);
     m_newWs.reset();
 
     m_active            = false;
@@ -1012,7 +1016,7 @@ bool Overview::tileBelongs(const PHLWINDOW& w, const PHLMONITOR& m, const PHLWOR
     if (!wws)
         return false;
     if (showAllWorkspaces()) { // expo: every window living on this monitor, any workspace
-        if (wws->m_isSpecialWorkspace && cfgInt("plugin:gloview:show_special", 0) == 0)
+        if (wsIsSpecial(wws) && cfgInt("plugin:gloview:show_special", 0) == 0)
             return false;
         return wws->m_monitor.lock() == m;
     }
@@ -1065,9 +1069,9 @@ void Overview::buildTiles() {
             const auto w = t.win.lock();
             if (!w || !showWindowLabels())
                 continue;
-            std::string text = w->m_title;
+            std::string text = w->metadata().title();
             if (text.empty())
-                text = w->m_class;
+                text = w->metadata().appID();
             if (text.size() > 80)
                 text = text.substr(0, 79) + "…";
             t.label = g_pHyprRenderer->renderText(text, lblCol, 15, false, "", 0, 700);
@@ -1102,24 +1106,24 @@ void Overview::buildStrip() {
         const auto ws = wref.lock();
         if (!ws || ws->m_monitor.lock() != m)
             continue;
-        if (ws->m_isSpecialWorkspace) {
+        if (wsIsSpecial(ws)) {
             if (showSpecial && wsHasWindows(ws)) // a scratchpad is only meaningful when populated
                 wss.push_back(ws);
             continue;
         }
-        if (ws->m_id <= 0)
+        if (!wsIsNumberedPositive(ws))
             continue;
         if (!showEmpty && ws != cur && !wsHasWindows(ws)) // hide empties (keep the displayed one)
             continue;
         wss.push_back(ws);
     }
 
-    if (cur && !cur->m_isSpecialWorkspace && cur->m_id > 0 && cur->m_monitor.lock() == m &&
+    if (wsIsNumberedPositive(cur) && cur->m_monitor.lock() == m &&
         std::none_of(wss.begin(), wss.end(), [&](const PHLWORKSPACE& ws) { return ws == cur; })) {
         wss.push_back(cur);
     }
 
-    std::sort(wss.begin(), wss.end(), [](const PHLWORKSPACE& a, const PHLWORKSPACE& b) { return a->m_id < b->m_id; });
+    std::sort(wss.begin(), wss.end(), [](const PHLWORKSPACE& a, const PHLWORKSPACE& b) { return wsNumericId(a) < wsNumericId(b); });
 
     // optional leading "All workspaces" card (toggles expo). Pushed FIRST so it sits at the
     // strip's leading edge; skipped wherever cards are treated as workspaces (see isAll guards).
@@ -1133,7 +1137,7 @@ void Overview::buildStrip() {
     for (const auto& ws : wss) {
         StripItem it;
         it.ws     = ws;
-        it.id     = ws->m_id;
+        it.id     = wsNumericId(ws);
         it.active = (ws == cur);
         for (const auto& w : Desktop::windowState()->windows()) {
             if (!w || !w->m_isMapped || w->isHidden() || w->m_workspace != ws)
@@ -1158,7 +1162,7 @@ void Overview::buildStrip() {
     // one you were standing on looked duplicated. When the highest-id listed workspace is
     // already empty it IS the tail, so no create-on-use card is appended; putting a window on
     // it makes the next one appear (and emptying it again takes it back away).
-    const bool haveEmptyTail = dynamic && !wss.empty() && wss.back()->m_id > 0 && !wsHasWindows(wss.back());
+    const bool haveEmptyTail = dynamic && !wss.empty() && wsNumericId(wss.back()) > 0 && !wsHasWindows(wss.back());
     StripItem  plus;
     plus.isPlus = true;
     plus.isNew  = dynamic;
@@ -1169,7 +1173,7 @@ void Overview::buildStrip() {
         for (const auto& s : m_strip)
             if (!s.isAll && s.id >= tail)
                 tail = s.id + 1;
-        while (State::workspaceState()->query().id(tail).run())
+        while (wsQueryById(tail))
             ++tail;
         plus.id = tail;
     }
@@ -1188,7 +1192,7 @@ void Overview::buildStrip() {
                 continue;
             }
             const auto ws = it.ws.lock();
-            std::string nm = ws ? ws->m_name : std::to_string(it.id);
+            std::string nm = ws ? wsDisplayName(ws) : std::to_string(it.id);
             const bool numeric = !nm.empty() && std::all_of(nm.begin(), nm.end(), [](char c) { return std::isdigit(static_cast<unsigned char>(c)); });
             const std::string text = numeric ? ("Workspace " + nm) : nm;
             it.label               = g_pHyprRenderer->renderText(text, lblCol, 13, false, "", 0, 600);
@@ -2651,7 +2655,7 @@ void Overview::dropOnWorkspace(const PHLWINDOW& w, const StripItem& it, const LR
     PHLWORKSPACE target;
     if (it.isPlus) { // the "+" card, or dynamic_workspaces' trailing empty one
         const int id   = resolveNewId(it.id);
-        target         = State::workspaceState()->create(id, m->m_id);
+        target         = wsCreateNumbered(id, m);
         m_newCardId    = id; // pop the new card in
         m_newCardStart = std::chrono::steady_clock::now();
         m_newCardAnim  = true;
@@ -2750,7 +2754,7 @@ void Overview::switchToWorkspace(const StripItem& it) {
 
     PHLWORKSPACE ws;
     if (it.isPlus) {
-        ws = State::workspaceState()->create(resolveNewId(it.id), m->m_id, "", false);
+        ws = wsCreateNumbered(resolveNewId(it.id), m, "", false);
         if (!ws)
             return;
         // A brand-new empty workspace is reaped within a frame or two unless it is focused,
@@ -2758,8 +2762,8 @@ void Overview::switchToWorkspace(const StripItem& it) {
         // its tiles survive. deactivate() releases the hold; the previous held one is let go
         // here, which is what makes dynamic_workspaces' abandoned empties disappear again.
         if (const auto old = m_newWs.lock(); old && old != ws)
-            old->setPersistent(false);
-        ws->setPersistent(true);
+            wsSetPersistent(old, false);
+        wsSetPersistent(ws, true);
         m_newWs = ws;
     } else if (const auto target = it.ws.lock()) {
         ws = target;
@@ -2770,7 +2774,7 @@ void Overview::switchToWorkspace(const StripItem& it) {
 
     // Slide direction from strip order — the cards are sorted by id, so the ids decide it.
     // A freshly created workspace always takes the highest id, hence "forward".
-    beginWsSlide((!cur || ws->m_id >= cur->m_id) ? 1 : -1);
+    beginWsSlide((!cur || wsNumericId(ws) >= wsNumericId(cur)) ? 1 : -1);
 
     // Display the target inside the overview without changing the live desktop yet;
     // captureSnapshots() force-renders inactive workspaces without a real slide.
@@ -2782,7 +2786,7 @@ void Overview::switchToWorkspace(const StripItem& it) {
     // user asked for that workspace, so it stays until close.
     if (dynamicWorkspaces()) {
         if (const auto held = m_newWs.lock(); held && held != ws && !workspaceOccupied(held)) {
-            held->setPersistent(false);
+            wsSetPersistent(held, false);
             m_newWs.reset();
         }
     }
@@ -2870,7 +2874,7 @@ std::vector<PHLWORKSPACE> Overview::liveWorkspaceList(const PHLMONITOR& m) const
 
     for (const auto& wref : State::workspaceState()->workspaces()) {
         const auto ws = wref.lock();
-        if (!ws || ws->m_isSpecialWorkspace || ws->m_id <= 0) // scratchpads and named (-1337…) aren't stepped through
+        if (!ws || !wsIsNumberedPositive(ws)) // scratchpads and named (-1337…) aren't stepped through
             continue;
         if (ws->m_monitor.lock() != m)
             continue;
@@ -2878,10 +2882,10 @@ std::vector<PHLWORKSPACE> Overview::liveWorkspaceList(const PHLMONITOR& m) const
             continue;
         wss.push_back(ws);
     }
-    if (cur && cur->m_id > 0 && !cur->m_isSpecialWorkspace && std::none_of(wss.begin(), wss.end(), [&](const PHLWORKSPACE& ws) { return ws == cur; }))
+    if (wsIsNumberedPositive(cur) && std::none_of(wss.begin(), wss.end(), [&](const PHLWORKSPACE& ws) { return ws == cur; }))
         wss.push_back(cur);
 
-    std::sort(wss.begin(), wss.end(), [](const PHLWORKSPACE& a, const PHLWORKSPACE& b) { return a->m_id < b->m_id; });
+    std::sort(wss.begin(), wss.end(), [](const PHLWORKSPACE& a, const PHLWORKSPACE& b) { return wsNumericId(a) < wsNumericId(b); });
     return wss;
 }
 
@@ -2935,11 +2939,11 @@ bool Overview::stepLiveWorkspace(int dir) {
     // …the create-on-use tail: take the id right after the last one, like buildStrip.
     int id = 1;
     for (const auto& ws : wss)
-        if (ws->m_id >= id)
-            id = ws->m_id + 1;
-    while (State::workspaceState()->query().id(id).run())
+        if (wsNumericId(ws) >= id)
+            id = wsNumericId(ws) + 1;
+    while (wsQueryById(id))
         ++id;
-    const auto fresh = State::workspaceState()->create(id, m->m_id, "", false);
+    const auto fresh = wsCreateNumbered(id, m, "", false);
     if (!fresh)
         return false;
     // No persistence pin needed here (unlike the overview's held tail): changeWorkspace makes
@@ -2960,7 +2964,7 @@ bool Overview::setWorkspace(int id) {
         const auto m = activeMonitor();
         if (!m)
             return false;
-        const auto ws = State::workspaceState()->query().id(id).run();
+        const auto ws = wsQueryById(id);
         if (!ws || ws->m_monitor.lock() != m)
             return false;
         if (ws != m->m_activeWorkspace)
@@ -2980,7 +2984,7 @@ bool Overview::setWorkspace(int id) {
     const auto m = m_monitor.lock();
     if (!m)
         return false;
-    const auto ws = State::workspaceState()->query().id(id).run();
+    const auto ws = wsQueryById(id);
     if (!ws || ws->m_monitor.lock() != m)
         return false;
     StripItem it;
@@ -3259,7 +3263,7 @@ void Overview::activateWindow(const PHLWINDOW& w, bool keybind) {
         const auto ws = w->m_workspace;
         // Special (scratchpad) workspaces are not something changeWorkspace should land on —
         // focusing the window is enough; Hyprland keeps the scratchpad up on its own.
-        if (m && ws && !ws->m_isSpecialWorkspace && ws->m_monitor.lock() == m)
+        if (m && ws && !wsIsSpecial(ws) && ws->m_monitor.lock() == m)
             m_workspace = ws;
     }
     close();
@@ -3480,7 +3484,7 @@ void Overview::addWorkspace(int id_) {
     if (!m)
         return;
     const int  id = resolveNewId(id_);
-    const auto ws = State::workspaceState()->create(id, m->m_id, "", false);
+    const auto ws = wsCreateNumbered(id, m, "", false);
     if (!ws)
         return;
     // A new empty workspace is reaped within a frame or two unless focused. Hold it
@@ -3488,8 +3492,8 @@ void Overview::addWorkspace(int id_) {
     // applies after). Releasing the previously held one is what lets an abandoned empty
     // workspace disappear again under dynamic_workspaces.
     if (const auto old = m_newWs.lock(); old && old != ws)
-        old->setPersistent(false);
-    ws->setPersistent(true);
+        wsSetPersistent(old, false);
+    wsSetPersistent(ws, true);
     m_newWs        = ws;
     m_newCardId    = id;
     m_newCardStart = std::chrono::steady_clock::now();
@@ -3580,7 +3584,7 @@ void Overview::deactivate() {
     // Drop the hold on a "+"-created workspace: it stays if active or a window landed
     // there, otherwise reaps like any empty one.
     if (const auto ws = m_newWs.lock())
-        ws->setPersistent(false);
+        wsSetPersistent(ws, false);
     m_newWs.reset();
 
     m_active  = false;

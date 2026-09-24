@@ -22,9 +22,16 @@ yay -S gloview
 
 ### Nixos
 
+This fork targets Hyprland commit `83cf6a6ed540dc37808434259c6a3ba663de9616`
+(workspace-state refactor: inline `State::workspaceState()`, `createNumbered` /
+`query().numbered`, etc.). **Always** make the plugin follow your compositor's
+Hyprland input so the ABI matches:
+
 ```nix
-inputs.gloview = { url = "github:fedsfarm/gloview"; inputs.hyprland.follows = "hyprland"; };
+inputs.gloview.url = "github:gitscout-bot/gloview/fix/hyprland-83cf6a6-state-api";
+inputs.gloview.inputs.hyprland.follows = "hyprland";
 ```
+
 ```nix
 wayland.windowManager.hyprland = {
   enable = true;
