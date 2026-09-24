@@ -1,14 +1,18 @@
 # TODO
 
-## Dual-view screen-share blackout (reverted)
+## Dual-view screen-share blackout
 
-`plugin:gloview:no_screen_share` is intentionally a **no-op** (default `0`).
+`plugin:gloview:no_screen_share` (default **1**) blacks the screencopy export while
+overview is open, mirroring Hyprland’s own noscreenshare path:
 
-Earlier commits hooked Hyprland `saveBufferForMirror` and cleared the share mirror FB
-(`bindTempFB` + `glClear`) so screencopy clients saw black while the local monitor kept
-live overview tiles. That ABRT'd the compositor on NVIDIA / Hyprland **83cf6a6**
-(`libgloview.so` → `CHyprOpenGLImpl::end()`). try/catch around the clear did not help
-(may be noexcept or an assert).
+- Hook `Screenshare::CScreenshareFrame::renderMonitor`
+- After the original blit + window/layer blackouts, draw a full-buffer
+  `CRectPassElement` with `Colors::BLACK` via `g_pHyprRenderer->draw(...)`
+- Runs only inside `beginRender(RENDER_MODE_TO_BUFFER / FULL_FAKE)` for share clients
+- Local swapchain / mainFB untouched → dual-view
 
-**Do not** reintroduce GL screenshare-privacy calls in this plugin until a proven-safe
-path exists. Stability > feature.
+**Do not** reintroduce `saveBufferForMirror` + `bindTempFB`/`glClear` or RENDER_POST EGL
+remake — those ABRT’d on NVIDIA / 83cf6a6.
+
+Residual risk: if `findFunctionsByName("renderMonitor")` fails to match the Screenshare
+symbol (ABI rename), blackout is soft-disabled with a notification; overview still loads.

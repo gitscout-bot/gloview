@@ -161,7 +161,7 @@ All keys live under `plugin:gloview:*`. Colors are `0xAARRGGBB` integers.
 | `switch_on_drop` | bool (0/1) | `0` | Dropping a window on a card also follows it to that workspace |
 | `switch_on_new_workspace` | bool (0/1) | `1` | Clicking `+` follows the display to the new workspace |
 | `close_button_color` | color | `0xe6e23b3b` | Desktop-mode `✕` close-button fill |
-| `no_screen_share` | bool (0/1) | `0` | **No-op.** Kept so existing configs do not break. Dual-view share-mirror blackout (`saveBufferForMirror` + `bindTempFB`/`glClear`) was reverted — it ABRT'd Hyprland on NVIDIA / 83cf6a6. Do not enable expecting privacy; overview content may appear in screencopy while open |
+| `no_screen_share` | bool (0/1) | `1` | While overview is open, screencopy / screen-share (Discord, demka, …) sees solid black on that monitor; local display keeps the live overview. Uses Hyprland’s own export-path blackout (`CRectPassElement` in `ScreenshareFrame::renderMonitor`), not mirror-FB clears |
 | `hide_top_layers` | bool (0/1) | `0` | Fade out Top layer surfaces (bars, e.g. Waybar) while open |
 | `hide_overlay_layers` | bool (0/1) | `0` | Fade out Overlay layer surfaces (popups/notifications) while open |
 | `above_namespaces` | string | `""` | Comma/space list of layer namespaces to draw *above* the overview (trailing `*` glob; a namespace containing `aboveoverview` always qualifies) |
@@ -230,7 +230,7 @@ supersedes the older `bar_position` (top/bottom only); set `anchor` and it wins.
                 switch_on_drop          = 0,
                 switch_on_new_workspace = 1,
 
-                no_screen_share     = 0,  -- NO-OP (dual-view blackout reverted; see TODO)
+                no_screen_share     = 1,  -- black share export while overview open (Hyprland noscreenshare path)
                 hide_top_layers     = 0,
                 hide_overlay_layers = 0,
                 above_namespaces    = "",
@@ -366,5 +366,5 @@ Email [root@feds.farm](mailto:root@feds.farm) or DM [@root:feds.farm](https://es
 
 ## TODO / known limitations
 
-- **Dual-view screen-share blackout reverted.** `plugin:gloview:no_screen_share` is a documented no-op. An earlier approach hooked `CHyprOpenGLImpl::saveBufferForMirror` and cleared the monitor mirror FB with `bindTempFB`/`glClear` so Discord/demka would see solid black while the local overview stayed live. That path ABRT'd Hyprland on NVIDIA (backtrace: `libgloview.so` → `CHyprOpenGLImpl::end()`); try/catch did not help (likely noexcept/assert). Stability > feature — do **not** reintroduce GL calls for screenshare privacy until a Hyprland-safe approach exists for 83cf6a6+.
+- **Screen-share blackout** (`plugin:gloview:no_screen_share`, default 1): while overview is open, share clients see solid black; the local monitor keeps the live overview. Implemented by hooking `Screenshare::CScreenshareFrame::renderMonitor` and drawing a full-buffer black `CRectPassElement` on the export path — the same mechanism Hyprland uses for window/layer `noscreenshare` / `no_screen_share`. Does **not** clear the mirror FB mid-`OpenGL::end` (that path ABRT’d on NVIDIA).
 

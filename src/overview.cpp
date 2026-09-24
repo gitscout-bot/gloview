@@ -42,6 +42,7 @@
 #include <hyprland/src/render/pass/PassElement.hpp>
 #include <hyprland/src/render/pass/SurfacePassElement.hpp>
 #include <hyprland/src/render/pass/RendererHintsPassElement.hpp>
+#include <hyprland/src/render/pass/RectPassElement.hpp>
 #include <hyprland/src/protocols/core/Compositor.hpp>
 #include <hyprland/src/desktop/view/WLSurface.hpp>
 #include <hyprutils/utils/ScopeGuard.hpp>
@@ -353,8 +354,10 @@ void renderWindowLive(const PHLWINDOW& w, const PHLMONITOR& mon, const CBox& des
 
 using PSHOULDRENDER              = bool (*)(void*, PHLWINDOW, PHLMONITOR);
 using PSHOULDRENDERWINDOW        = bool (*)(void*, PHLWINDOW);
+using PRENDERMONITOR             = void (*)(void*);
 PSHOULDRENDER         g_shouldRenderOrig         = nullptr;
 PSHOULDRENDERWINDOW   g_shouldRenderWindowOrig   = nullptr;
+PRENDERMONITOR        g_renderMonitorOrig        = nullptr;
 
 bool hkShouldRenderWindow(void* thisptr, PHLWINDOW window, PHLMONITOR monitor) {
     if (g_overview) {
@@ -372,6 +375,54 @@ bool hkShouldRenderWindowAny(void* thisptr, PHLWINDOW window) {
     if (g_overview && g_overview->forceRenderWindow(window))
         return true;
     return g_shouldRenderWindowOrig ? g_shouldRenderWindowOrig(thisptr, window) : true;
+}
+
+// plugin:gloview:no_screen_share — hide overview from screencopy / screen-share only.
+// Hyprland blacks noscreenshare windows/layers in Screenshare::CScreenshareFrame::renderMonitor
+// by drawing CRectPassElement BLACK rects onto the *export* buffer AFTER blitting the mirror
+// texture (see Hyprland ScreenshareFrame.cpp ~224–311). Local swapchain is untouched.
+// We participate in that same pass: after renderMonitor returns, cover the export FB with
+// solid black while overview is open. Do NOT touch mirror FB / bindTempFB / glClear /
+// RENDER_POST EGL remake — those ABRT'd on NVIDIA.
+bool honorNoScreenShare() {
+    const auto it = g_config.ints.find("plugin:gloview:no_screen_share");
+    if (it == g_config.ints.end() || !it->second)
+        return true;
+    return static_cast<int>(it->second->value()) != 0;
+}
+
+bool shouldBlackoutScreenshareExport() {
+    if (!g_overview || !g_overview->active())
+        return false;
+    if (!honorNoScreenShare())
+        return false;
+    if (!g_pHyprRenderer)
+        return false;
+    const auto mon = g_pHyprRenderer->m_renderData.pMonitor.lock();
+    if (!mon || mon != g_overview->monitor())
+        return false;
+    return true;
+}
+
+void blackoutScreenshareExport() {
+    if (!g_pHyprRenderer)
+        return;
+    const Vector2D sz = g_pHyprRenderer->m_renderData.fbSize;
+    if (!(sz.x > 0 && sz.y > 0))
+        return;
+    // Same helper Hyprland uses for window/layer noscreenshare blackout on the export path.
+    g_pHyprRenderer->startRenderPass();
+    const CBox full{{0, 0}, sz};
+    g_pHyprRenderer->draw(CRectPassElement::SRectData{.box = full, .color = Colors::BLACK}, full);
+}
+
+// Runs inside ScreenshareFrame::copyDmabuf/copyShm → render() → renderMonitor, already in
+// beginRender(RENDER_MODE_TO_BUFFER / FULL_FAKE). Drawing here blacks demka/Discord only.
+void hkRenderMonitor(void* thisptr) {
+    if (g_renderMonitorOrig)
+        g_renderMonitorOrig(thisptr);
+    if (shouldBlackoutScreenshareExport())
+        blackoutScreenshareExport();
 }
 
 CHyprColor argb(Hyprlang::INT raw, double alphaMul = 1.0) {
@@ -480,8 +531,13 @@ Overview::~Overview() {
         HyprlandAPI::removeFunctionHook(m_handle, m_shouldRenderWindowHook);
         m_shouldRenderWindowHook = nullptr;
     }
+    if (m_renderMonitorHook) {
+        HyprlandAPI::removeFunctionHook(m_handle, m_renderMonitorHook);
+        m_renderMonitorHook = nullptr;
+    }
     g_shouldRenderOrig       = nullptr;
     g_shouldRenderWindowOrig = nullptr;
+    g_renderMonitorOrig      = nullptr;
 }
 
 bool Overview::initialize() {
@@ -554,6 +610,49 @@ bool Overview::initialize() {
         return false;
     }
     g_shouldRenderWindowOrig = reinterpret_cast<PSHOULDRENDERWINDOW>(m_shouldRenderWindowHook->m_original);
+
+    // Optional: dual-view no_screen_share via ScreenshareFrame::renderMonitor blackout.
+    // Failure here must NOT fail plugin init — overview still works; share simply sees the
+    // overview until the hook can be installed.
+    m_renderMonitorHook  = nullptr;
+    g_renderMonitorOrig  = nullptr;
+    {
+        const auto matches = HyprlandAPI::findFunctionsByName(m_handle, "renderMonitor");
+        void*      addr    = nullptr;
+        for (const auto& mt : matches) {
+            // Prefer Screenshare::CScreenshareFrame::renderMonitor(); skip .cold and unrelated.
+            if (mt.demangled.find("Screenshare") == std::string::npos)
+                continue;
+            if (mt.demangled.find("renderMonitor(") == std::string::npos)
+                continue;
+            if (mt.demangled.find(".cold") != std::string::npos)
+                continue;
+            // Skip renderMonitorRegion if it ever appears as a distinct symbol.
+            if (mt.demangled.find("renderMonitorRegion") != std::string::npos)
+                continue;
+            addr = mt.address;
+            break;
+        }
+        if (!addr) {
+            HyprlandAPI::addNotification(m_handle,
+                "[gloview] ScreenshareFrame::renderMonitor not found — no_screen_share dual-view blackout disabled",
+                CHyprColor(1.0, 0.6, 0.2, 1.0), 6000);
+        } else {
+            m_renderMonitorHook =
+                HyprlandAPI::createFunctionHook(m_handle, addr, reinterpret_cast<void*>(&hkRenderMonitor));
+            if (!m_renderMonitorHook || !m_renderMonitorHook->hook()) {
+                HyprlandAPI::addNotification(m_handle,
+                    "[gloview] failed to hook ScreenshareFrame::renderMonitor — no_screen_share dual-view blackout disabled",
+                    CHyprColor(1.0, 0.6, 0.2, 1.0), 6000);
+                if (m_renderMonitorHook) {
+                    HyprlandAPI::removeFunctionHook(m_handle, m_renderMonitorHook);
+                    m_renderMonitorHook = nullptr;
+                }
+            } else {
+                g_renderMonitorOrig = reinterpret_cast<PRENDERMONITOR>(m_renderMonitorHook->m_original);
+            }
+        }
+    }
 
     return true;
 }

@@ -264,6 +264,7 @@ class Overview {
     CHyprSignalListener m_keyL;
     CFunctionHook*      m_shouldRenderHook = nullptr;
     CFunctionHook*      m_shouldRenderWindowHook = nullptr; // one-arg shouldRenderWindow, used by makeSnapshot()
+    CFunctionHook*      m_renderMonitorHook = nullptr; // ScreenshareFrame::renderMonitor — export blackout
 
     // config helpers
     int           cfgInt(const char* name, int fallback) const;
