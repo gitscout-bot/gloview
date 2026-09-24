@@ -28,7 +28,7 @@ This fork targets Hyprland commit `83cf6a6ed540dc37808434259c6a3ba663de9616`
 Hyprland input so the ABI matches:
 
 ```nix
-inputs.gloview.url = "github:gitscout-bot/gloview/fix/hyprland-83cf6a6-state-api";
+inputs.gloview.url = "github:gitscout-bot/gloview";
 inputs.gloview.inputs.hyprland.follows = "hyprland";
 ```
 
