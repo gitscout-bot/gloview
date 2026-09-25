@@ -56,6 +56,10 @@ inputs.gloview.url = "github:gitscout-bot/gloview";
 inputs.gloview.inputs.hyprland.follows = "hyprland";
 ```
 
+With `follows`, the flake passes that Hyprland derivation through unchanged. Updating
+`gloview` and switching Home Manager therefore builds only the plugin `.so`; it does
+not create or rebuild a second Hyprland derivation.
+
 ```nix
 wayland.windowManager.hyprland = {
   enable = true;

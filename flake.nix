@@ -33,19 +33,11 @@
   in {
     packages = eachSystem (system: let
       pkgs = pkgsFor.${system};
-      # Build against the exact Hyprland package from the flake input so the plugin ABI
-      # matches that pin. On v0.56.2, Hyprland's CMake still asks for `glaze 7...<8` while
-      # its nixpkgs ships glaze 8 — relax the constraint only when the pattern is present
-      # (83cf6a6 already dropped it; --replace-fail would fail there).
-      hyprlandPkg = hyprland.packages.${system}.hyprland.overrideAttrs (old: {
-        postPatch =
-          (old.postPatch or "")
-          + ''
-            if grep -q 'glaze 7\.\.\.<8' CMakeLists.txt 2>/dev/null; then
-              substituteInPlace CMakeLists.txt --replace-fail "glaze 7...<8" "glaze"
-            fi
-          '';
-      });
+      # Use the exact Hyprland derivation from the flake input unchanged. In particular,
+      # do not apply attribute overrides here: even an empty build-phase hook creates
+      # a new Hyprland derivation, so a consumer using inputs.gloview.inputs.hyprland.follows
+      # would rebuild the compositor just to build this plugin.
+      hyprlandPkg = hyprland.packages.${system}.hyprland;
     in {
       # mkHyprlandPlugin now lives in nixpkgs (pkgs.hyprlandPlugins.mkHyprlandPlugin), not in
       # the Hyprland flake's `lib`. It is built on hyprland.stdenv.mkDerivation and auto-adds
