@@ -20,6 +20,7 @@
 #include <hyprland/src/state/MonitorState.hpp>
 #include <hyprland/src/state/WorkspaceState.hpp>
 #include <hyprland/src/managers/fullscreen/FullscreenController.hpp>
+#include <hyprland/src/managers/screenshare/ScreenshareManager.hpp>
 #include "hypr_compat.hpp" // Window / workspace / IPC / modifier ABI shims
 #include <hyprland/src/desktop/view/LayerSurface.hpp>
 #include <hyprland/src/event/EventBus.hpp>
@@ -224,6 +225,15 @@ void fixFractionalScaleUV(const SP<CWLSurfaceResource>& surface, const PHLMONITO
         uvMax -= misalignment / bufferSize;
 }
 
+// Forward decls — used by renderWindowLive Option B before the full noscreenshare block.
+using PRENDERSS = void (*)(void*);
+PRENDERSS g_screenshareExportOrig = nullptr;
+// True only when we own CScreenshareFrame::renderMonitor (dual-view export blackout).
+// When noshare-cover owns that trampoline this stays false → Option B while sharing.
+bool g_exportDualView = false;
+bool windowNoScreenShare(const PHLWINDOW& w);
+bool honorNoScreenShare();
+
 // Render a window's LIVE surface tree scaled into `destPx`, clipped to `clipPx`
 // (both monitor PIXEL coords) via real CSurfacePassElements. No crop rect to drift,
 // so immune to snapshots' stale/mis-cropped tiles; works on hidden workspaces.
@@ -233,6 +243,28 @@ void renderWindowLive(const PHLWINDOW& w, const PHLMONITOR& mon, const CBox& des
         return;
     if (!(destPx.w > 0 && destPx.h > 0))
         return;
+
+    // Option B (zero hook conflict with noshare-cover): when we do NOT own renderMonitor
+    // (g_exportDualView=false) and this output is being screenshared, bake solid black into
+    // the overview pass for noscreenshare tiles. Mirror capture carries black to demka/Discord.
+    // Local also sees black for those tiles while sharing — honest tradeoff. With dual-view
+    // (we own renderMonitor), keep live tiles here; export hook blacks only the share FB.
+    if (honorNoScreenShare() && windowNoScreenShare(w) && !g_exportDualView) {
+        bool sharing = false;
+        if (Screenshare::mgr())
+            sharing = Screenshare::mgr()->isOutputBeingSSd(mon);
+        if (sharing) {
+            const double roundPx = roundSlotPx > 0.0 ? roundSlotPx * mon->m_scale : 0.0;
+            g_pHyprRenderer->m_renderPass.add(makeUnique<CRectPassElement>(CRectPassElement::SRectData{
+                .box           = destPx,
+                .color         = CHyprColor{0.F, 0.F, 0.F, std::clamp(alpha, 0.F, 1.F)},
+                .round         = static_cast<int>(roundPx),
+                .roundingPower = winRoundingPower(w),
+                .clipBox       = clipPx,
+            }));
+            return;
+        }
+    }
 
     // When reported size > committed buffer (CWLSurface::small(): X11 size hints/mid-resize),
     // getTexBox CENTERS it at real size, leaving an uncovered margin. m_fillIgnoreSmall
@@ -350,12 +382,10 @@ void renderWindowLive(const PHLWINDOW& w, const PHLMONITOR& mon, const CBox& des
 using PSHOULDRENDER              = bool (*)(void*, PHLWINDOW, PHLMONITOR);
 using PSHOULDRENDERWINDOW        = bool (*)(void*, PHLWINDOW);
 // Member fns void(CScreenshareFrame::*)() — thisptr is first arg. Same ABI for
-// renderMonitor() and render(); we may fall back to the latter when another plugin
-// (e.g. noshare-cover) already owns renderMonitor.
-using PRENDERSS                  = void (*)(void*);
+// renderMonitor() and render(); we prefer ::render() so noshare-cover can own
+// renderMonitor. g_screenshareExportOrig is declared above (Option B needs it).
 PSHOULDRENDER         g_shouldRenderOrig         = nullptr;
 PSHOULDRENDERWINDOW   g_shouldRenderWindowOrig   = nullptr;
-PRENDERSS             g_screenshareExportOrig    = nullptr;
 
 bool hkShouldRenderWindow(void* thisptr, PHLWINDOW window, PHLMONITOR monitor) {
     if (g_overview) {
@@ -529,6 +559,7 @@ Overview::~Overview() {
     g_shouldRenderOrig       = nullptr;
     g_shouldRenderWindowOrig = nullptr;
     g_screenshareExportOrig  = nullptr;
+    g_exportDualView         = false;
 }
 
 bool Overview::initialize() {
@@ -602,16 +633,16 @@ bool Overview::initialize() {
     }
     g_shouldRenderWindowOrig = reinterpret_cast<PSHOULDRENDERWINDOW>(m_shouldRenderWindowHook->m_original);
 
-    // Optional: per-tile noscreenshare blackout on the screencopy export path.
-    // Failure here must NOT fail plugin init and must NOT spam a scary notify — overview
-    // still works; share simply sees live noscreenshare tiles. Prefer hooking
-    // CScreenshareFrame::renderMonitor; if that symbol is missing OR already hooked by
-    // another plugin (noshare-cover), fall back to CScreenshareFrame::render() which
-    // calls renderMonitor and returns after it. Resolve via exact Itanium mangling
-    // (dlsym) first, then HyprlandAPI::findFunctionsByName. Verified exported on both
-    // Hyprland 83cf6a6 and v0.56.2 (Arch stripped + nix RelWithDebInfo).
+    // Per-tile noscreenshare blackout. Must not fail plugin init or spam notifies.
+    // Dual-view (local live + share black) only when we successfully hook
+    // CScreenshareFrame::renderMonitor. If noshare-cover already owns that trampoline,
+    // leave it alone and rely on Option B in renderWindowLive while the output is being
+    // shared (mirror then carries black tiles). Optional ::render() hook is best-effort
+    // only and does not enable dual-view. Resolve via Itanium dlsym then findFunctionsByName.
+    // Verified on Hyprland v0.56.2 and 83cf6a6.
     m_renderMonitorHook       = nullptr;
     g_screenshareExportOrig   = nullptr;
+    g_exportDualView          = false;
     {
         // Stable Itanium names — identical on 0.56.2 (efb5099) and 83cf6a6.
         static constexpr const char* kMangledRenderMonitor =
@@ -667,12 +698,19 @@ bool Overview::initialize() {
         void* addrMonitor = resolve(kMangledRenderMonitor, "renderMonitor", "CScreenshareFrame::renderMonitor");
         void* addrRender  = resolve(kMangledRender, "render", "CScreenshareFrame::render");
 
-        if (!tryHook(addrMonitor, "Screenshare::CScreenshareFrame::renderMonitor()")) {
-            // Another plugin often owns renderMonitor (Hyprland allows one trampoline).
-            // render() wraps it — install after so our tile blackout still runs.
-            if (!tryHook(addrRender, "Screenshare::CScreenshareFrame::render()")) {
-                dbg("no_screen_share tile blackout soft-disabled (no export hook)");
-            }
+        if (tryHook(addrMonitor, "Screenshare::CScreenshareFrame::renderMonitor()")) {
+            // Exclusive trampoline → dual-view: live local tiles, black on export FB only.
+            g_exportDualView = true;
+            dbg("no_screen_share: dual-view export blackout active");
+        } else {
+            // noshare-cover (or similar) owns renderMonitor. Option B blacks tiles in the
+            // overview pass while isOutputBeingSSd — guaranteed share blackout on 0.56.2.
+            // Optional ::render() hook is best-effort only (may be a no-op if inlined/wrong
+            // GL state after render returns); do NOT set g_exportDualView.
+            if (tryHook(addrRender, "Screenshare::CScreenshareFrame::render()"))
+                dbg("no_screen_share: export render() hooked (best-effort); Option B while sharing");
+            else
+                dbg("no_screen_share: no export hook; Option B while sharing");
         }
     }
 

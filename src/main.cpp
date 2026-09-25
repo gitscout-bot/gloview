@@ -235,10 +235,9 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     addColor("plugin:gloview:close_button_color", Config::INTEGER{0xe6e23b3bLL}); // desktop-mode "✕" close button fill
 
     // --- bar / layer-shell hiding (waybar, quickshell-based bars, …) ---
-    // no_screen_share: while overview is open, honor Hyprland noscreenshare / no_screen_share
-    // on overview *preview tiles* in the screencopy export (CRectPassElement on each tile box
-    // in ScreenshareFrame::renderMonitor). Other tiles + chrome stay visible; local overview
-    // keeps live previews. Default 1.
+    // no_screen_share: honor Hyprland noscreenshare on overview *preview tiles* in share
+    // (per-tile black). Dual-view via ScreenshareFrame::renderMonitor when free; with
+    // noshare-cover, Option B blacks ruled tiles in the overview pass while sharing. Default 1.
     addInt("plugin:gloview:no_screen_share", Config::INTEGER{1});
 
     addInt("plugin:gloview:hide_top_layers", Config::INTEGER{0});     // fade out Top layer surfaces (bars) while the overview is up

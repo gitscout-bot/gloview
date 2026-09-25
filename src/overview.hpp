@@ -115,9 +115,8 @@ class Overview {
     [[nodiscard]] PHLMONITOR monitor() const { return m_monitor.lock(); }
     [[nodiscard]] bool       blurEnabled() const; // plugin:gloview:blur != 0 (queried by the pass)
 
-    // Screencopy export path ONLY (ScreenshareFrame::renderMonitor): black preview tiles whose
-    // window has Hyprland noscreenshare / no_screen_share. Local interactive overview keeps
-    // live previews — do not call from normal render.
+    // Screencopy export path (when we own ScreenshareFrame::renderMonitor): black preview
+    // tiles with Hyprland noscreenshare / no_screen_share. Dual-view keeps local live.
     void blackoutNoScreenShareExportTiles() const;
 
   private:
@@ -269,7 +268,7 @@ class Overview {
     CHyprSignalListener m_keyL;
     CFunctionHook*      m_shouldRenderHook = nullptr;
     CFunctionHook*      m_shouldRenderWindowHook = nullptr; // one-arg shouldRenderWindow, used by makeSnapshot()
-    CFunctionHook*      m_renderMonitorHook = nullptr; // ScreenshareFrame::renderMonitor or ::render — export noscreenshare tiles
+    CFunctionHook*      m_renderMonitorHook = nullptr; // ScreenshareFrame::renderMonitor (dual-view) or ::render (best-effort)
 
     // config helpers
     int           cfgInt(const char* name, int fallback) const;

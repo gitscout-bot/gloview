@@ -199,7 +199,7 @@ All keys live under `plugin:gloview:*`. Colors are `0xAARRGGBB` integers.
 | `switch_on_drop` | bool (0/1) | `0` | Dropping a window on a card also follows it to that workspace |
 | `switch_on_new_workspace` | bool (0/1) | `1` | Clicking `+` follows the display to the new workspace |
 | `close_button_color` | color | `0xe6e23b3b` | Desktop-mode `✕` close-button fill |
-| `no_screen_share` | bool (0/1) | `1` | While overview is open, honor Hyprland `noscreenshare` / `no_screen_share` on overview **preview tiles** in screencopy export (black those tile boxes only); other tiles + chrome stay visible; local overview keeps live previews. Uses `CRectPassElement` in `ScreenshareFrame::renderMonitor`, not mirror-FB clears |
+| `no_screen_share` | bool (0/1) | `1` | Honor Hyprland `noscreenshare` / `no_screen_share` on overview **preview tiles** in share: black those boxes only; other tiles + chrome stay visible. Dual-view (local live) when gloview owns `ScreenshareFrame::renderMonitor`; with noshare-cover (owns that trampoline) ruled tiles go black locally too while the output is shared (Option B). Not mirror-FB clears |
 | `hide_top_layers` | bool (0/1) | `0` | Fade out Top layer surfaces (bars, e.g. Waybar) while open |
 | `hide_overlay_layers` | bool (0/1) | `0` | Fade out Overlay layer surfaces (popups/notifications) while open |
 | `above_namespaces` | string | `""` | Comma/space list of layer namespaces to draw *above* the overview (trailing `*` glob; a namespace containing `aboveoverview` always qualifies) |
@@ -404,5 +404,5 @@ Email [root@feds.farm](mailto:root@feds.farm) or DM [@root:feds.farm](https://es
 
 ## TODO / known limitations
 
-- **Screen-share tile blackout** (`plugin:gloview:no_screen_share`, default 1): while overview is open, share clients see black **only** on preview tiles whose window has Hyprland `noscreenshare` / `no_screen_share`; other tiles and chrome stay visible. Local monitor keeps live previews. Hooked on `Screenshare::CScreenshareFrame::renderMonitor` with per-tile `CRectPassElement` blacks — not a full-buffer clear, and not mirror-FB / RENDER_POST EGL (those ABRT’d on NVIDIA).
+- **Screen-share tile blackout** (`plugin:gloview:no_screen_share`, default 1): share clients see black **only** on preview tiles whose window has Hyprland `noscreenshare` / `no_screen_share`; other tiles and chrome stay visible. Dual-view (local live) when gloview hooks `ScreenshareFrame::renderMonitor`. If noshare-cover already owns that trampoline, Option B blacks ruled tiles in the overview pass while the output is being shared (local also black for those tiles during share). Not full-buffer clear / mirror-FB / RENDER_POST EGL.
 
