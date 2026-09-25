@@ -120,6 +120,11 @@ class Overview {
     void blackoutNoScreenShareExportTiles() const;
     // Path C: clear+add noshare-cover extra rects for noscreenshare preview tiles (global layout).
     void syncNoshareCoverExtraRects() const;
+    // (Re)choose Path A/B/C for noscreenshare tiles in captures; resync if noshare-cover
+    // appeared or went away since the last choice.
+    void setupScreenshareExport();
+    void resyncScreenshareExport();
+    void scheduleCoverResync();
 
   private:
     struct Tile {
@@ -268,6 +273,9 @@ class Overview {
     CHyprSignalListener m_mouseAxisL;
     CHyprSignalListener m_mouseMoveL;
     CHyprSignalListener m_keyL;
+    CHyprSignalListener m_configReloadL;    // re-pick the share path after plugin load/unload
+    SP<CEventLoopTimer> m_coverResyncTimer; // resync off the render path after noshare-cover's gone callback
+    bool                m_coverPathActive = false; // current path defers to noshare-cover (B/C)
     CFunctionHook*      m_shouldRenderHook = nullptr;
     CFunctionHook*      m_shouldRenderWindowHook = nullptr; // one-arg shouldRenderWindow, used by makeSnapshot()
     CFunctionHook*      m_renderMonitorHook = nullptr; // ScreenshareFrame::renderMonitor (dual-view) or ::render (best-effort)

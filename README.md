@@ -274,7 +274,7 @@ supersedes the older `bar_position` (top/bottom only); set `anchor` and it wins.
                 switch_on_new_workspace = 1,
 
                 no_screen_share       = 1,  -- black noscreenshare preview tiles in share (Path A/C dual-view)
-                noshare_cover_compat  = 1,  -- Path C (extra-rect API) or B when noshare-cover is loaded
+                noshare_cover_compat  = 1,  -- Path C (noshare-cover API) when noshare-cover is loaded
                 hide_top_layers       = 0,
                 hide_overlay_layers = 0,
                 above_namespaces    = "",
@@ -410,45 +410,48 @@ Email [root@feds.farm](mailto:root@feds.farm) or DM [@root:feds.farm](https://es
 
 ## Screen share + noshare-cover
 
-[noshare-cover](https://github.com/gitscout-bot/noshare-cover) replaces Hyprland’s
+[noshare-cover](https://github.com/gitscout-bot/noshare-cover) replaces Hyprland's
 `no_screen_share` black boxes with an image/video on the **share** path. It hooks
-`ScreenshareFrame::renderMonitor` (Hyprland’s function trampoline is exclusive — two
+`ScreenshareFrame::renderMonitor` (Hyprland's function trampoline is exclusive, two
 plugins cannot both own that hook) and paints covers on real window boxes. It also
-exports a small C API so other plugins can register **extra** cover rectangles
-(overview tile boxes):
+exports a C API so other plugins can add rectangles of their own, here the overview
+tile boxes. gloview uses API v2 when available (`include/noshare_cover_api.h` in
+noshare-cover):
 
-```c
-void noshare_cover_clear_extra_rects(void);
-void noshare_cover_add_extra_rect(int monitor_id, double x, double y, double w, double h, double rounding);
-```
+- one client per plugin (`register_client("gloview")`), its rects replaced atomically
+  per monitor with `set_rects`;
+- each rect carries the window address and `FILL_WINDOW`, so a preview tile shows the
+  **same cover as the window itself** in the capture, not a black box;
+- a *gone* callback fired from noshare-cover's `PLUGIN_EXIT` after it released
+  `renderMonitor`.
 
-`monitor_id` is Hyprland’s monitor id (`hyprctl monitors`). `x,y,w,h,rounding` are
-**global layout pixels** (same space as window position/size). Rects persist until
-`clear`; they are drawn opaque black after window covers. `rounding=0` is sharp.
+With the callback armed gloview drops its `RTLD_NOLOAD` handle right after binding.
+Holding it would keep noshare-cover mapped after unload, and a same-path reload would
+then silently get the old image. Older noshare-cover builds without v2 still work
+through the v1 functions (`noshare_cover_clear_extra_rects` /
+`noshare_cover_add_extra_rect`, black boxes).
 
 **RTLD_LOCAL caveat:** Hyprland loads plugins with `RTLD_LOCAL`, so
-`dlsym(RTLD_DEFAULT, …)` will **not** see those symbols. gloview resolves the mapped
+`dlsym(RTLD_DEFAULT, ...)` will **not** see those symbols. gloview resolves the mapped
 `.so` via `dl_iterate_phdr` (needle `noshare-cover` / `libnoshare-cover.so`), then
 `dlopen(path, RTLD_LAZY | RTLD_NOLOAD)` + `dlsym`. See `src/noshare_cover_compat.hpp`.
 
-gloview (`plugin:gloview:noshare_cover_compat`, default **1**) therefore:
+gloview (`plugin:gloview:noshare_cover_compat`, default **1**) picks one of:
 
-1. **Detects** noshare-cover via Hyprland’s plugin list or a mapped `.so`, and **binds**
-   the extra-rect API when present (null-checked; never links noshare-cover at build time).
-2. **Path C** (cover loaded + API bound): never fights for `renderMonitor`. Each overview
-   frame `clear()`s then `add_extra_rect` for every noscreenshare preview tile (main grid,
-   strip cards, drag/fly/slide). **Dual-view:** local overview keeps live tiles; share
-   sees black tile boxes via noshare-cover. Clears on overview close / plugin unload.
-3. **Path B** (cover loaded, API missing — older cover): leave `renderMonitor` alone;
+1. **Path C** (cover loaded + API bound): never fights for `renderMonitor`. Each overview
+   frame sends every noscreenshare preview tile (main grid, strip cards, drag/fly/slide).
+   **Dual-view:** local overview keeps live tiles; the share shows the covers.
+2. **Path B** (cover loaded, no API at all, very old cover): leave `renderMonitor` alone;
    while `isOutputBeingSSd`, overview draws solid black for ruled tiles in the normal
    pass so the mirror carries black. **Local tradeoff:** those tiles are also black on
    the interactive overview while that output is shared.
-4. **Path A** (cover not loaded, or compat off): gloview hooks `renderMonitor` for
+3. **Path A** (cover not loaded, or compat off): gloview hooks `renderMonitor` for
    dual-view when the trampoline is free.
 
-**Load order:** load/enable noshare-cover **before** gloview so detection/bind succeed at
-init. If gloview took Path A first, unload/reload with cover first, or keep compat on
-and reload gloview after cover.
+**Load order does not matter.** Hyprland reloads the config after every plugin
+load/unload; gloview re-picks the path then (and on the gone callback). If gloview owns
+`renderMonitor` when noshare-cover appears, it lets go and noshare-cover (which retries
+its hook) takes over; when noshare-cover is unloaded gloview takes it back.
 
 Set `noshare_cover_compat = 0` only if you intentionally want gloview to fight for
 Path A (hook may still fail silently → Path B). Soft failures never ABRT or orange-notify.

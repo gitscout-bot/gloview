@@ -528,7 +528,13 @@ Overview::~Overview() {
     // inactive overview and no dangling refs.
     m_active  = false;
     m_opening = false;
-    noshare_cover::unbind(); // clear extra rects + drop RTLD_NOLOAD handle
+    m_configReloadL.reset();
+    if (m_coverResyncTimer && g_pEventLoopManager) {
+        m_coverResyncTimer->cancel();
+        g_pEventLoopManager->removeTimer(m_coverResyncTimer);
+        m_coverResyncTimer.reset();
+    }
+    noshare_cover::unbind(); // clear extra rects, unregister, drop any handle
     PreviewFilter::reset();
     restoreLayers(); // never leave a bar stuck at alpha 0 if we're torn down mid-hide
     restoreFill();   // never leave a window's surface stuck stretching its small buffer
@@ -636,13 +642,31 @@ bool Overview::initialize() {
     }
     g_shouldRenderWindowOrig = reinterpret_cast<PSHOULDRENDERWINDOW>(m_shouldRenderWindowHook->m_original);
 
+    setupScreenshareExport();
+
+    // Re-pick the share path whenever the plugin set may have changed: Hyprland reloads the
+    // config after every plugin load/unload. This is what makes load order irrelevant.
+    m_configReloadL = events.config.reloaded.listen([this] { resyncScreenshareExport(); });
+
+    return true;
+}
+
+// Pick how noscreenshare preview tiles are handled in screen captures (Path A/B/C, see
+// noshare_cover_compat.hpp). Safe to call again at any time: tears the previous choice down.
+void Overview::setupScreenshareExport() {
     // Per-tile noscreenshare blackout. Must not fail plugin init or spam notifies.
     // See noshare_cover_compat.hpp: Path C = noshare-cover extra-rect API (dual-view, no
     // local black); Path B = cover without API → Option B while SS; Path A = we own
     // renderMonitor. Verified on Hyprland v0.56.2 and 83cf6a6.
-    m_renderMonitorHook       = nullptr;
+    if (m_renderMonitorHook) {
+        HyprlandAPI::removeFunctionHook(m_handle, m_renderMonitorHook);
+        m_renderMonitorHook = nullptr;
+    }
+    noshare_cover::unbind();
+    noshare_cover::g_goneFlag = false;
     g_screenshareExportOrig   = nullptr;
     g_exportDualView          = false;
+    m_coverPathActive         = false;
     {
         // Stable Itanium names — identical on 0.56.2 (efb5099) and 83cf6a6.
         static constexpr const char* kMangledRenderMonitor =
@@ -719,6 +743,7 @@ bool Overview::initialize() {
                 dbg("no_screen_share: no export hook; Option B while sharing");
         };
 
+        m_coverPathActive = path != noshare_cover::Path::A_DualView;
         if (path == noshare_cover::Path::C_CoverApi) {
             // Cover paints extra rects on the share path; local tiles stay live.
             g_exportDualView = true;
@@ -735,8 +760,32 @@ bool Overview::initialize() {
             takePathB("renderMonitor unavailable — Path B while sharing");
         }
     }
+}
 
-    return true;
+// Config reloaded (also right after any plugin load/unload) or noshare-cover said goodbye:
+// redo the path choice if it no longer matches whether noshare-cover is loaded.
+// Re-pick outside the render pass (hooking functions mid-frame is not safe).
+void Overview::scheduleCoverResync() {
+    if (!g_pEventLoopManager)
+        return;
+    if (!m_coverResyncTimer) {
+        m_coverResyncTimer = makeShared<CEventLoopTimer>(
+            std::chrono::milliseconds(1), [this](SP<CEventLoopTimer> self, void*) {
+                self->updateTimeout(std::nullopt);
+                resyncScreenshareExport();
+            },
+            nullptr);
+        g_pEventLoopManager->addTimer(m_coverResyncTimer);
+    } else
+        m_coverResyncTimer->updateTimeout(std::chrono::milliseconds(1));
+}
+
+void Overview::resyncScreenshareExport() {
+    const bool coverNow = noshare_cover::isLoaded();
+    if (!noshare_cover::g_goneFlag && coverNow == m_coverPathActive)
+        return;
+    dbg(std::string("noshare_cover_compat: cover ") + (coverNow ? "appeared" : "gone") + ", re-picking share path");
+    setupScreenshareExport();
 }
 
 // Screencopy export path (ScreenshareFrame::renderMonitor): black only preview boxes for
@@ -851,6 +900,8 @@ void Overview::blackoutNoScreenShareExportTiles() const {
 // Path C: push noscreenshare overview tile boxes to noshare-cover each frame (global layout
 // pixels). clear()+add; rects persist until the next clear. No-op if API unbound / honor off.
 void Overview::syncNoshareCoverExtraRects() const {
+    if (noshare_cover::g_goneFlag)
+        const_cast<Overview*>(this)->scheduleCoverResync();
     if (!noshare_cover::apiAvailable())
         return;
     if (!m_active || !honorNoScreenShare()) {
@@ -863,7 +914,7 @@ void Overview::syncNoshareCoverExtraRects() const {
         return;
     }
 
-    noshare_cover::clearExtraRects();
+    noshare_cover::beginTiles();
 
     const int      monId        = static_cast<int>(m->m_id);
     const Vector2D monPos       = m->m_position;
@@ -878,7 +929,8 @@ void Overview::syncNoshareCoverExtraRects() const {
             return;
         // Global layout pixels (same space as window position/size); cover subtracts mon pos,
         // applies scale, subtracts capture origin.
-        noshare_cover::addExtraRect(monId, monPos.x + lb.x, monPos.y + lb.y, lb.w, lb.h, rounding);
+        // v2: fill with the window's own cover (same as its real box in the share)
+        noshare_cover::addExtraRect(monId, monPos.x + lb.x, monPos.y + lb.y, lb.w, lb.h, rounding, reinterpret_cast<uint64_t>(w.get()));
     };
 
     for (size_t i = 0; i < m_tiles.size(); ++i) {
@@ -943,6 +995,8 @@ void Overview::syncNoshareCoverExtraRects() const {
         const LRect lb = flyBox(f);
         addFor(w, lb, flyRound(lb));
     }
+
+    noshare_cover::commitTiles(monId);
 }
 
 // ---- config -----------------------------------------------------------------
