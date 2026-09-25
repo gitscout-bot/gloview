@@ -22,6 +22,7 @@
 #include <hyprland/src/managers/fullscreen/FullscreenController.hpp>
 #include <hyprland/src/managers/screenshare/ScreenshareManager.hpp>
 #include "hypr_compat.hpp" // Window / workspace / IPC / modifier ABI shims
+#include "noshare_cover_compat.hpp" // Path A/B vs noshare-cover renderMonitor
 #include <hyprland/src/desktop/view/LayerSurface.hpp>
 #include <hyprland/src/event/EventBus.hpp>
 #include <hyprland/src/helpers/Color.hpp>
@@ -634,12 +635,10 @@ bool Overview::initialize() {
     g_shouldRenderWindowOrig = reinterpret_cast<PSHOULDRENDERWINDOW>(m_shouldRenderWindowHook->m_original);
 
     // Per-tile noscreenshare blackout. Must not fail plugin init or spam notifies.
-    // Dual-view (local live + share black) only when we successfully hook
-    // CScreenshareFrame::renderMonitor. If noshare-cover already owns that trampoline,
-    // leave it alone and rely on Option B in renderWindowLive while the output is being
-    // shared (mirror then carries black tiles). Optional ::render() hook is best-effort
-    // only and does not enable dual-view. Resolve via Itanium dlsym then findFunctionsByName.
-    // Verified on Hyprland v0.56.2 and 83cf6a6.
+    // See noshare_cover_compat.hpp for research: noshare-cover owns renderMonitor, chains
+    // m_original, covers only real window boxes, exposes no extra-rect API. Path A = we
+    // own renderMonitor (dual-view). Path B = leave the trampoline alone + Option B in
+    // renderWindowLive while isOutputBeingSSd. Verified on Hyprland v0.56.2 and 83cf6a6.
     m_renderMonitorHook       = nullptr;
     g_screenshareExportOrig   = nullptr;
     g_exportDualView          = false;
@@ -695,22 +694,37 @@ bool Overview::initialize() {
             return true;
         };
 
+        const bool coverLoaded = noshare_cover::isLoaded();
+        bool       compatOn    = true;
+        if (const auto it = g_config.ints.find("plugin:gloview:noshare_cover_compat"); it != g_config.ints.end() && it->second)
+            compatOn = static_cast<int>(it->second->value()) != 0;
+        const auto path = noshare_cover::choosePath(coverLoaded, compatOn);
+        dbg(std::string("noshare_cover_compat: cover_loaded=") + (coverLoaded ? "1" : "0") +
+            " compat=" + (compatOn ? "1" : "0") + " → " + noshare_cover::pathLabel(path));
+
         void* addrMonitor = resolve(kMangledRenderMonitor, "renderMonitor", "CScreenshareFrame::renderMonitor");
         void* addrRender  = resolve(kMangledRender, "render", "CScreenshareFrame::render");
 
-        if (tryHook(addrMonitor, "Screenshare::CScreenshareFrame::renderMonitor()")) {
-            // Exclusive trampoline → dual-view: live local tiles, black on export FB only.
-            g_exportDualView = true;
-            dbg("no_screen_share: dual-view export blackout active");
-        } else {
-            // noshare-cover (or similar) owns renderMonitor. Option B blacks tiles in the
-            // overview pass while isOutputBeingSSd — guaranteed share blackout on 0.56.2.
+        auto takePathB = [&](const char* reason) {
             // Optional ::render() hook is best-effort only (may be a no-op if inlined/wrong
             // GL state after render returns); do NOT set g_exportDualView.
+            dbg(std::string("no_screen_share: ") + reason);
             if (tryHook(addrRender, "Screenshare::CScreenshareFrame::render()"))
                 dbg("no_screen_share: export render() hooked (best-effort); Option B while sharing");
             else
                 dbg("no_screen_share: no export hook; Option B while sharing");
+        };
+
+        if (path == noshare_cover::Path::B_Coexist) {
+            // Detected noshare-cover: never fight for renderMonitor.
+            takePathB("noshare-cover loaded — skipping renderMonitor (Path B)");
+        } else if (tryHook(addrMonitor, "Screenshare::CScreenshareFrame::renderMonitor()")) {
+            // Exclusive trampoline → dual-view: live local tiles, black on export FB only.
+            g_exportDualView = true;
+            dbg("no_screen_share: dual-view export blackout active");
+        } else {
+            // Hook failed (cover loaded after us, another owner, or missing symbol).
+            takePathB("renderMonitor unavailable — Path B while sharing");
         }
     }
 

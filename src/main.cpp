@@ -239,6 +239,9 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     // (per-tile black). Dual-view via ScreenshareFrame::renderMonitor when free; with
     // noshare-cover, Option B blacks ruled tiles in the overview pass while sharing. Default 1.
     addInt("plugin:gloview:no_screen_share", Config::INTEGER{1});
+    // When noshare-cover is loaded, skip fighting for ScreenshareFrame::renderMonitor (Path B).
+    // Set 0 to always attempt Path A (dual-view) even if cover is detected. Default 1.
+    addInt("plugin:gloview:noshare_cover_compat", Config::INTEGER{1});
 
     addInt("plugin:gloview:hide_top_layers", Config::INTEGER{0});     // fade out Top layer surfaces (bars) while the overview is up
     addInt("plugin:gloview:hide_overlay_layers", Config::INTEGER{0}); // fade out Overlay layer surfaces (popups/notifications)
