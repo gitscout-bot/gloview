@@ -377,13 +377,16 @@ bool hkShouldRenderWindowAny(void* thisptr, PHLWINDOW window) {
     return g_shouldRenderWindowOrig ? g_shouldRenderWindowOrig(thisptr, window) : true;
 }
 
-// plugin:gloview:no_screen_share — hide overview from screencopy / screen-share only.
-// Hyprland blacks noscreenshare windows/layers in Screenshare::CScreenshareFrame::renderMonitor
-// by drawing CRectPassElement BLACK rects onto the *export* buffer AFTER blitting the mirror
-// texture (see Hyprland ScreenshareFrame.cpp ~224–311). Local swapchain is untouched.
-// We participate in that same pass: after renderMonitor returns, cover the export FB with
-// solid black while overview is open. Do NOT touch mirror FB / bindTempFB / glClear /
-// RENDER_POST EGL remake — those ABRT'd on NVIDIA.
+// plugin:gloview:no_screen_share — honor Hyprland noscreenshare on overview *tiles* in the
+// screencopy export only. Hyprland blacks noscreenshare windows at their real boxes in
+// Screenshare::CScreenshareFrame::renderMonitor AFTER the mirror blit (ScreenshareFrame.cpp
+// ~224–311). Overview relocates those surfaces into preview tiles, so we black ONLY those
+// tile boxes on the same export path. Local swapchain / interactive overview keeps live
+// previews. Do NOT full-buffer black, mirror FB clear, bindTempFB/glClear, or RENDER_POST EGL.
+bool windowNoScreenShare(const PHLWINDOW& w) {
+    return w && w->m_ruleApplicator && w->m_ruleApplicator->noScreenShare().valueOrDefault();
+}
+
 bool honorNoScreenShare() {
     const auto it = g_config.ints.find("plugin:gloview:no_screen_share");
     if (it == g_config.ints.end() || !it->second)
@@ -391,7 +394,7 @@ bool honorNoScreenShare() {
     return static_cast<int>(it->second->value()) != 0;
 }
 
-bool shouldBlackoutScreenshareExport() {
+bool shouldHonorNoScreenShareExport() {
     if (!g_overview || !g_overview->active())
         return false;
     if (!honorNoScreenShare())
@@ -404,25 +407,13 @@ bool shouldBlackoutScreenshareExport() {
     return true;
 }
 
-void blackoutScreenshareExport() {
-    if (!g_pHyprRenderer)
-        return;
-    const Vector2D sz = g_pHyprRenderer->m_renderData.fbSize;
-    if (!(sz.x > 0 && sz.y > 0))
-        return;
-    // Same helper Hyprland uses for window/layer noscreenshare blackout on the export path.
-    g_pHyprRenderer->startRenderPass();
-    const CBox full{{0, 0}, sz};
-    g_pHyprRenderer->draw(CRectPassElement::SRectData{.box = full, .color = Colors::BLACK}, full);
-}
-
 // Runs inside ScreenshareFrame::copyDmabuf/copyShm → render() → renderMonitor, already in
-// beginRender(RENDER_MODE_TO_BUFFER / FULL_FAKE). Drawing here blacks demka/Discord only.
+// beginRender(RENDER_MODE_TO_BUFFER / FULL_FAKE). Per-tile blacks demka/Discord only.
 void hkRenderMonitor(void* thisptr) {
     if (g_renderMonitorOrig)
         g_renderMonitorOrig(thisptr);
-    if (shouldBlackoutScreenshareExport())
-        blackoutScreenshareExport();
+    if (shouldHonorNoScreenShareExport())
+        g_overview->blackoutNoScreenShareExportTiles();
 }
 
 CHyprColor argb(Hyprlang::INT raw, double alphaMul = 1.0) {
@@ -611,9 +602,9 @@ bool Overview::initialize() {
     }
     g_shouldRenderWindowOrig = reinterpret_cast<PSHOULDRENDERWINDOW>(m_shouldRenderWindowHook->m_original);
 
-    // Optional: dual-view no_screen_share via ScreenshareFrame::renderMonitor blackout.
-    // Failure here must NOT fail plugin init — overview still works; share simply sees the
-    // overview until the hook can be installed.
+    // Optional: per-tile noscreenshare via ScreenshareFrame::renderMonitor export blackout.
+    // Failure here must NOT fail plugin init — overview still works; share simply sees
+    // live noscreenshare tiles until the hook can be installed.
     m_renderMonitorHook  = nullptr;
     g_renderMonitorOrig  = nullptr;
     {
@@ -635,14 +626,14 @@ bool Overview::initialize() {
         }
         if (!addr) {
             HyprlandAPI::addNotification(m_handle,
-                "[gloview] ScreenshareFrame::renderMonitor not found — no_screen_share dual-view blackout disabled",
+                "[gloview] ScreenshareFrame::renderMonitor not found — no_screen_share tile blackout disabled",
                 CHyprColor(1.0, 0.6, 0.2, 1.0), 6000);
         } else {
             m_renderMonitorHook =
                 HyprlandAPI::createFunctionHook(m_handle, addr, reinterpret_cast<void*>(&hkRenderMonitor));
             if (!m_renderMonitorHook || !m_renderMonitorHook->hook()) {
                 HyprlandAPI::addNotification(m_handle,
-                    "[gloview] failed to hook ScreenshareFrame::renderMonitor — no_screen_share dual-view blackout disabled",
+                    "[gloview] failed to hook ScreenshareFrame::renderMonitor — no_screen_share tile blackout disabled",
                     CHyprColor(1.0, 0.6, 0.2, 1.0), 6000);
                 if (m_renderMonitorHook) {
                     HyprlandAPI::removeFunctionHook(m_handle, m_renderMonitorHook);
@@ -655,6 +646,115 @@ bool Overview::initialize() {
     }
 
     return true;
+}
+
+// Screencopy export path (ScreenshareFrame::renderMonitor): black only preview boxes for
+// windows with Hyprland noscreenshare / no_screen_share. Overview chrome and other tiles
+// stay visible in the share. Never called from the local interactive render path.
+void Overview::blackoutNoScreenShareExportTiles() const {
+    if (!g_pHyprRenderer)
+        return;
+    const auto m = m_monitor.lock();
+    if (!m)
+        return;
+    const double scale = m->m_scale;
+    if (!(scale > 0.0))
+        return;
+
+    auto drawBlack = [](const CBox& px, int roundPx, float roundingPower) {
+        if (!(px.w > 0.0 && px.h > 0.0))
+            return;
+        g_pHyprRenderer->draw(CRectPassElement::SRectData{
+                                  .box           = px,
+                                  .color         = Colors::BLACK,
+                                  .round         = roundPx,
+                                  .roundingPower = roundingPower,
+                              },
+                              px);
+    };
+
+    auto maybeBlack = [&](const PHLWINDOW& w, const CBox& px, double roundLogical) {
+        if (!windowNoScreenShare(w))
+            return;
+        drawBlack(px, static_cast<int>(roundLogical * scale), w->presentation().roundingPower());
+    };
+
+    // Same startRenderPass + draw pattern Hyprland uses after the mirror blit.
+    g_pHyprRenderer->startRenderPass();
+
+    const double previewRound = static_cast<double>(cfgInt("plugin:gloview:preview_round", 12));
+    const int    dragIdx =
+        (m_dragging && m_pressTile >= 0 && m_pressTile < static_cast<int>(m_tiles.size())) ? m_pressTile : -1;
+
+    for (size_t i = 0; i < m_tiles.size(); ++i) {
+        if (static_cast<int>(i) == dragIdx)
+            continue;
+        const auto w = m_tiles[i].win.lock();
+        if (!w || !w->mapped() || w->isHidden())
+            continue;
+        const LRect lb = tileContentBox(i, currentBox(m_tiles[i], static_cast<int>(i)));
+        maybeBlack(w, CBox{lb.x * scale, lb.y * scale, lb.w * scale, lb.h * scale}, previewRound);
+    }
+
+    if (dragIdx >= 0) {
+        const auto w = m_tiles[static_cast<size_t>(dragIdx)].win.lock();
+        if (w && w->mapped() && !w->isHidden()) {
+            const LRect lb = tileContentBox(static_cast<size_t>(dragIdx), dragBox());
+            maybeBlack(w, CBox{lb.x * scale, lb.y * scale, lb.w * scale, lb.h * scale}, previewRound);
+        }
+    }
+
+    if (!m_prevTiles.empty()) {
+        const Vector2D off = wsSlideOffset(true);
+        for (const auto& t : m_prevTiles) {
+            const auto w = t.win.lock();
+            if (!w || !w->mapped() || w->isHidden())
+                continue;
+            maybeBlack(w,
+                       CBox{(t.target.x + off.x) * scale, (t.target.y + off.y) * scale, t.target.w * scale, t.target.h * scale},
+                       previewRound);
+        }
+    }
+
+    if (!m_strip.empty() && eased() > 0.01) {
+        const Vector2D slide  = stripSlide(eased());
+        const Vector2D scroll = stripScroll();
+        for (const auto& it : m_strip) {
+            if (it.isPlus || it.isAll)
+                continue;
+            LRect card = it.card;
+            card.x += slide.x + scroll.x;
+            card.y += slide.y + scroll.y;
+            for (const auto& sw : it.wins) {
+                const auto w = sw.win.lock();
+                if (!w || !w->mapped() || w->isHidden())
+                    continue;
+                if (isFlying(w))
+                    continue;
+                const LRect slot{card.x + sw.rel.x * card.w, card.y + sw.rel.y * card.h, std::max(2.0, sw.rel.w * card.w),
+                                 std::max(2.0, sw.rel.h * card.h)};
+                const CBox  slotPx{slot.x * scale, slot.y * scale, slot.w * scale, slot.h * scale};
+                const CBox  cardPx{card.x * scale, card.y * scale, card.w * scale, card.h * scale};
+                const CBox  clipPx = intersectBox(slotPx, cardPx);
+                if (clipPx.w <= 0.0 || clipPx.h <= 0.0)
+                    continue;
+                const bool   cropped = !roughly(clipPx.w, slotPx.w, 0.01) || !roughly(clipPx.h, slotPx.h, 0.01);
+                const double stripRound =
+                    cropped ? 0.0 :
+                              std::min(static_cast<double>(cfgInt("plugin:gloview:strip_card_round", 10)),
+                                       std::min(slot.w, slot.h) * 0.35);
+                maybeBlack(w, clipPx, stripRound);
+            }
+        }
+    }
+
+    for (const auto& f : m_flying) {
+        const auto w = f.win.lock();
+        if (!w || !w->mapped() || w->isHidden())
+            continue;
+        const LRect lb = flyBox(f);
+        maybeBlack(w, CBox{lb.x * scale, lb.y * scale, lb.w * scale, lb.h * scale}, flyRound(lb));
+    }
 }
 
 // ---- config -----------------------------------------------------------------
