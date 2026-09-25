@@ -118,6 +118,8 @@ class Overview {
     // Screencopy export path (when we own ScreenshareFrame::renderMonitor): black preview
     // tiles with Hyprland noscreenshare / no_screen_share. Dual-view keeps local live.
     void blackoutNoScreenShareExportTiles() const;
+    // Path C: clear+add noshare-cover extra rects for noscreenshare preview tiles (global layout).
+    void syncNoshareCoverExtraRects() const;
 
   private:
     struct Tile {

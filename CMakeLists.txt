@@ -36,7 +36,7 @@ foreach(inc ${HYPR_DEPS_INCLUDE_DIRS})
 endforeach()
 
 target_link_directories(gloview PRIVATE ${HYPR_DEPS_LIBRARY_DIRS} ${LUA_LIBRARY_DIRS})
-target_link_libraries(gloview PRIVATE ${HYPR_DEPS_LIBRARIES} ${LUA_LIBRARIES} PkgConfig::GLESV2)
+target_link_libraries(gloview PRIVATE ${HYPR_DEPS_LIBRARIES} ${LUA_LIBRARIES} PkgConfig::GLESV2 ${CMAKE_DL_LIBS})
 
 install(TARGETS gloview LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
 
