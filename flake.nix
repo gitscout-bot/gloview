@@ -2,11 +2,19 @@
   description = "GloView — a macOS Mission Control-style overview plugin for Hyprland";
 
   inputs = {
-    # Pin Hyprland to the compositor ABI this fork targets. Commit 83cf6a6 (reported as
-    # v0.56.0-style / nix build ABI 83cf6a6…_aq_0.15_…) inlined State::workspaceState() and
-    # refactored workspace create/query onto State::Workspace::CState. Downstream MUST set
-    # `inputs.gloview.inputs.hyprland.follows = "hyprland"` so the plugin links against the
-    # EXACT same Hyprland as the running compositor.
+    # Default pin: Hyprland 83cf6a6 (workspace/window/IPC refactor). The plugin also
+    # compiles against Hyprland v0.56.2 via compile-time __has_include detection in
+    # src/hypr_compat.hpp — override the input (or `follows` your compositor) to pick ABI:
+    #
+    #   # newer / nixoser-style:
+    #   inputs.hyprland.url = "github:hyprwm/Hyprland?rev=83cf6a6ed540dc37808434259c6a3ba663de9616";
+    #   # Arch / upstream-typical:
+    #   inputs.hyprland.url = "github:hyprwm/Hyprland?ref=v0.56.2";
+    #   # OR always match your system Hyprland:
+    #   inputs.gloview.inputs.hyprland.follows = "hyprland";
+    #
+    # Single package `gloview` — the flake's hyprland input decides the ABI. No separate
+    # gloview-legacy output; override-input / follows is the switch.
     hyprland.url = "github:hyprwm/Hyprland?rev=83cf6a6ed540dc37808434259c6a3ba663de9616";
     nixpkgs.follows = "hyprland/nixpkgs";
     systems.follows = "hyprland/systems";
@@ -25,9 +33,19 @@
   in {
     packages = eachSystem (system: let
       pkgs = pkgsFor.${system};
-      # Build against the exact Hyprland package supplied by the pinned input so the
-      # plugin ABI follows that input without applying patches for older revisions.
-      hyprlandPkg = hyprland.packages.${system}.hyprland;
+      # Build against the exact Hyprland package from the flake input so the plugin ABI
+      # matches that pin. On v0.56.2, Hyprland's CMake still asks for `glaze 7...<8` while
+      # its nixpkgs ships glaze 8 — relax the constraint only when the pattern is present
+      # (83cf6a6 already dropped it; --replace-fail would fail there).
+      hyprlandPkg = hyprland.packages.${system}.hyprland.overrideAttrs (old: {
+        postPatch =
+          (old.postPatch or "")
+          + ''
+            if grep -q 'glaze 7\.\.\.<8' CMakeLists.txt 2>/dev/null; then
+              substituteInPlace CMakeLists.txt --replace-fail "glaze 7...<8" "glaze"
+            fi
+          '';
+      });
     in {
       # mkHyprlandPlugin now lives in nixpkgs (pkgs.hyprlandPlugins.mkHyprlandPlugin), not in
       # the Hyprland flake's `lib`. It is built on hyprland.stdenv.mkDerivation and auto-adds
@@ -53,7 +71,7 @@
 
         meta = {
           description = "macOS Mission Control-style overview for Hyprland";
-          homepage = "https://github.com/fedsfarm/gloview";
+          homepage = "https://github.com/gitscout-bot/gloview";
           license = lib.licenses.gpl3Plus;
           platforms = lib.platforms.linux;
         };

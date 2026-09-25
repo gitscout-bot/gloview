@@ -8,7 +8,7 @@
 #include <hyprland/src/config/values/types/FloatValue.hpp>
 #include <hyprland/src/config/values/types/StringValue.hpp>
 #include <hyprland/src/plugins/PluginAPI.hpp>
-#include <hyprland/src/ipc/s1/S1.hpp>
+#include "hypr_compat.hpp"
 
 extern "C" {
 #include <lauxlib.h>
@@ -272,25 +272,15 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     HyprlandAPI::addDispatcherV2(handle, "gloview:setworkspace", dispSetWorkspace);
 
     // hyprctl commands (exact, not lua-evaluated) — reliable invoke path: hyprctl <name>
-    // Socket1::SCommand replaced SHyprCtlCommand on Hyprland 83cf6a6.
-    auto hyprctlExact = [&](const char* name, auto action) {
-        HyprlandAPI::registerHyprCtlCommand(handle, IPC::Socket1::SCommand{
-            .name    = name,
-            .match   = IPC::Socket1::COMMAND_MATCH_EXACT,
-            .handler = [action](const IPC::Socket1::SRequest&) -> IPC::Socket1::SResponse {
-                action();
-                return "ok\n";
-            },
-        });
-    };
-    hyprctlExact("gloview", [] {
+    // registerExactHyprCtl picks Socket1::SCommand (83cf6a6+) or SHyprCtlCommand (0.56.2).
+    gloview::registerExactHyprCtl(handle, "gloview", [] {
         if (g_overview)
             g_overview->toggle();
     });
     // close-only (no-op if not open): dismiss the overlay before unloading.
     // Unloading mid-render with the overview up tears down the render hooks while
     // an in-flight frame still references them → Hyprland crash.
-    hyprctlExact("gloviewclose", [] {
+    gloview::registerExactHyprCtl(handle, "gloviewclose", [] {
         if (g_overview)
             g_overview->close();
     });
@@ -299,27 +289,27 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     // animation), this drops all overlay state + the recapture timer synchronously,
     // so the next frame renders with no plugin-owned pass elements and dlclose can't
     // free a callback that is still referenced mid-frame. Makes reload deterministic.
-    hyprctlExact("gloviewunload", [] {
+    gloview::registerExactHyprCtl(handle, "gloviewunload", [] {
         if (g_overview)
             g_overview->hardClose();
     });
     // free-arrange desktop mode toggle:  hyprctl gloviewdesktop
-    hyprctlExact("gloviewdesktop", [] {
+    gloview::registerExactHyprCtl(handle, "gloviewdesktop", [] {
         if (g_overview)
             g_overview->toggleDesktop();
     });
     // all-workspaces (expo) view toggle:  hyprctl gloviewall — opens into expo if closed
-    hyprctlExact("gloviewall", [] {
+    gloview::registerExactHyprCtl(handle, "gloviewall", [] {
         if (g_overview)
             g_overview->toggleAllWorkspaces();
     });
     // step the displayed workspace:  hyprctl gloviewnext / gloviewprev
     // (setworkspace takes an argument, so it is dispatcher-only: hyprctl dispatch gloview:setworkspace 2)
-    hyprctlExact("gloviewnext", [] {
+    gloview::registerExactHyprCtl(handle, "gloviewnext", [] {
         if (g_overview)
             g_overview->nextWorkspace();
     });
-    hyprctlExact("gloviewprev", [] {
+    gloview::registerExactHyprCtl(handle, "gloviewprev", [] {
         if (g_overview)
             g_overview->prevWorkspace();
     });

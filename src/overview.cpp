@@ -18,18 +18,11 @@
 #include <hyprland/src/state/MonitorState.hpp>
 #include <hyprland/src/state/WorkspaceState.hpp>
 #include <hyprland/src/managers/fullscreen/FullscreenController.hpp>
-#include <hyprland/src/desktop/view/window/Window.hpp>
-#include <hyprland/src/desktop/view/window/WindowPresentation.hpp>
-#include <hyprland/src/desktop/view/window/WindowMetadata.hpp>
-#include <hyprland/src/desktop/view/window/WindowBackend.hpp>
+#include "hypr_compat.hpp" // Window / workspace / IPC / modifier ABI shims
 #include <hyprland/src/desktop/view/LayerSurface.hpp>
-#include <hyprland/src/workspace/HLWorkspace.hpp>
-#include <hyprland/src/workspace/RegularWorkspace.hpp>
-#include "hypr_compat.hpp"
 #include <hyprland/src/event/EventBus.hpp>
 #include <hyprland/src/helpers/Color.hpp>
 #include <hyprland/src/managers/input/InputManager.hpp>
-#include <hyprland/src/input/Keys.hpp>
 #include <hyprland/src/pointer/PointerManager.hpp>
 #include <hyprland/src/managers/eventLoop/EventLoopManager.hpp>
 #include <hyprland/src/managers/eventLoop/EventLoopTimer.hpp>
@@ -181,7 +174,7 @@ bool hasStablePreviewUV(const PHLWINDOW& window, const SP<CWLSurfaceResource>& s
         return false;
 
     const auto& state = surface->m_current;
-    if (window->backend().isX11() && state.viewport.hasSource)
+    if (winIsX11(window) && state.viewport.hasSource)
         return false;
     if (texBoxLogical.size() != state.size)
         return false;
@@ -191,10 +184,10 @@ bool hasStablePreviewUV(const PHLWINDOW& window, const SP<CWLSurfaceResource>& s
         expectedPx = (state.viewport.destination * monitor->m_scale).round();
     else if (state.viewport.hasSource)
         expectedPx = (state.viewport.source.size() * monitor->m_scale).round();
-    else if (mainSurface && window->backend().reportedSize() != state.size)
+    else if (mainSurface && winReportedSize(window) != state.size)
         expectedPx = (state.size * monitor->m_scale).round();
     else if (mainSurface)
-        expectedPx = (window->backend().reportedSize() * monitor->m_scale).round();
+        expectedPx = (winReportedSize(window) * monitor->m_scale).round();
     else
         expectedPx = texBoxPx.size();
 
@@ -234,7 +227,7 @@ void fixFractionalScaleUV(const SP<CWLSurfaceResource>& surface, const PHLMONITO
 // so immune to snapshots' stale/mis-cropped tiles; works on hidden workspaces.
 void renderWindowLive(const PHLWINDOW& w, const PHLMONITOR& mon, const CBox& destPx, const CBox& clipPx, float alpha, const Time::steady_tp& when,
                       int previewFilterGrid, double roundSlotPx = 0.0) {
-    if (!w || !mon || !w->mapped() || !w->wlSurface() || !w->wlSurface()->resource())
+    if (!winMapped(w) || !mon || !w->wlSurface() || !w->wlSurface()->resource())
         return;
     if (!(destPx.w > 0 && destPx.h > 0))
         return;
@@ -265,7 +258,7 @@ void renderWindowLive(const PHLWINDOW& w, const PHLMONITOR& mon, const CBox& des
     if (!(scaleMod > 0.F))
         return;
 
-    const Vector2D logicalTL = pos + w->presentation().floatingOffset();
+    const Vector2D logicalTL = pos + winFloatingOffset(w);
     const Vector2D scaledTL  = (logicalTL - mon->m_position) * mon->m_scale;
     const Vector2D translate = destPx.pos() / scaleMod - scaledTL;
 
@@ -293,7 +286,7 @@ void renderWindowLive(const PHLWINDOW& w, const PHLMONITOR& mon, const CBox& des
     data.alpha          = std::clamp(alpha, 0.F, 1.F);
     data.decorate       = false;
     data.rounding       = roundSlotPx > 0.0 ? roundSlotPx * mon->m_scale : 0.0;
-    data.roundingPower  = w->presentation().roundingPower();
+    data.roundingPower  = winRoundingPower(w);
     data.blur           = false;
     data.pWindow        = w;
     data.clipBox        = clipPx;
@@ -384,7 +377,7 @@ bool hkShouldRenderWindowAny(void* thisptr, PHLWINDOW window) {
 // tile boxes on the same export path. Local swapchain / interactive overview keeps live
 // previews. Do NOT full-buffer black, mirror FB clear, bindTempFB/glClear, or RENDER_POST EGL.
 bool windowNoScreenShare(const PHLWINDOW& w) {
-    return w && w->m_ruleApplicator && w->m_ruleApplicator->noScreenShare().valueOrDefault();
+    return winNoScreenShare(w);
 }
 
 bool honorNoScreenShare() {
@@ -676,7 +669,7 @@ void Overview::blackoutNoScreenShareExportTiles() const {
     auto maybeBlack = [&](const PHLWINDOW& w, const CBox& px, double roundLogical) {
         if (!windowNoScreenShare(w))
             return;
-        drawBlack(px, static_cast<int>(roundLogical * scale), w->presentation().roundingPower());
+        drawBlack(px, static_cast<int>(roundLogical * scale), winRoundingPower(w));
     };
 
     // Same startRenderPass + draw pattern Hyprland uses after the mirror blit.
@@ -690,7 +683,7 @@ void Overview::blackoutNoScreenShareExportTiles() const {
         if (static_cast<int>(i) == dragIdx)
             continue;
         const auto w = m_tiles[i].win.lock();
-        if (!w || !w->mapped() || w->isHidden())
+        if (!winMapped(w) || w->isHidden())
             continue;
         const LRect lb = tileContentBox(i, currentBox(m_tiles[i], static_cast<int>(i)));
         maybeBlack(w, CBox{lb.x * scale, lb.y * scale, lb.w * scale, lb.h * scale}, previewRound);
@@ -698,7 +691,7 @@ void Overview::blackoutNoScreenShareExportTiles() const {
 
     if (dragIdx >= 0) {
         const auto w = m_tiles[static_cast<size_t>(dragIdx)].win.lock();
-        if (w && w->mapped() && !w->isHidden()) {
+        if (winMapped(w) && !w->isHidden()) {
             const LRect lb = tileContentBox(static_cast<size_t>(dragIdx), dragBox());
             maybeBlack(w, CBox{lb.x * scale, lb.y * scale, lb.w * scale, lb.h * scale}, previewRound);
         }
@@ -708,7 +701,7 @@ void Overview::blackoutNoScreenShareExportTiles() const {
         const Vector2D off = wsSlideOffset(true);
         for (const auto& t : m_prevTiles) {
             const auto w = t.win.lock();
-            if (!w || !w->mapped() || w->isHidden())
+            if (!winMapped(w) || w->isHidden())
                 continue;
             maybeBlack(w,
                        CBox{(t.target.x + off.x) * scale, (t.target.y + off.y) * scale, t.target.w * scale, t.target.h * scale},
@@ -727,7 +720,7 @@ void Overview::blackoutNoScreenShareExportTiles() const {
             card.y += slide.y + scroll.y;
             for (const auto& sw : it.wins) {
                 const auto w = sw.win.lock();
-                if (!w || !w->mapped() || w->isHidden())
+                if (!winMapped(w) || w->isHidden())
                     continue;
                 if (isFlying(w))
                     continue;
@@ -750,7 +743,7 @@ void Overview::blackoutNoScreenShareExportTiles() const {
 
     for (const auto& f : m_flying) {
         const auto w = f.win.lock();
-        if (!w || !w->mapped() || w->isHidden())
+        if (!winMapped(w) || w->isHidden())
             continue;
         const LRect lb = flyBox(f);
         maybeBlack(w, CBox{lb.x * scale, lb.y * scale, lb.w * scale, lb.h * scale}, flyRound(lb));
@@ -857,7 +850,7 @@ void Overview::autodeleteEmpty() {
         // was added. Releasing it when it is genuinely abandoned is switchToWorkspace's job.
         if (ws == held)
             continue;
-        if (ws->visible())           // active on some monitor
+        if (wsVisible(ws))           // active on some monitor
             continue;
         if (workspaceOccupied(ws))
             continue;
@@ -876,7 +869,7 @@ bool Overview::wsHasMappedWindows(const PHLWORKSPACE& ws) const {
     if (!ws)
         return false;
     for (const auto& win : Desktop::windowState()->windows())
-        if (win && win->mapped() && !win->isHidden() && win->m_workspace == ws)
+        if (winMapped(win) && !win->isHidden() && win->m_workspace == ws)
             return true;
     return false;
 }
@@ -1212,7 +1205,7 @@ bool Overview::showAllWorkspaces() const {
 // (per-frame add/remove detector) MUST agree, else syncTiles sees a phantom diff every frame
 // and reflow-churns.
 bool Overview::tileBelongs(const PHLWINDOW& w, const PHLMONITOR& m, const PHLWORKSPACE& ws) const {
-    if (!w || !w->mapped() || w->isHidden())
+    if (!winMapped(w) || w->isHidden())
         return false;
     const auto wws = w->m_workspace;
     if (!wws)
@@ -1271,9 +1264,9 @@ void Overview::buildTiles() {
             const auto w = t.win.lock();
             if (!w || !showWindowLabels())
                 continue;
-            std::string text = w->metadata().title();
+            std::string text = winTitle(w);
             if (text.empty())
-                text = w->metadata().appID();
+                text = winAppId(w);
             if (text.size() > 80)
                 text = text.substr(0, 79) + "…";
             t.label = g_pHyprRenderer->renderText(text, lblCol, 15, false, "", 0, 700);
@@ -1342,7 +1335,7 @@ void Overview::buildStrip() {
         it.id     = wsNumericId(ws);
         it.active = (ws == cur);
         for (const auto& w : Desktop::windowState()->windows()) {
-            if (!w || !w->mapped() || w->isHidden() || w->m_workspace != ws)
+            if (!winMapped(w) || w->isHidden() || w->m_workspace != ws)
                 continue;
             const auto p = w->positionAnimation()->goal();
             const auto s = w->sizeAnimation()->goal();
@@ -1549,9 +1542,9 @@ void Overview::captureSnapshots() {
     // Only snapshot presentable windows: a window mid-move/resize can be transiently
     // unmapped/workspace-less, and makeSnapshot then null-derefs the surface → crash.
     const auto snap = [this](const PHLWINDOW& w) -> bool {
-        if (w && w->mapped() && w->m_workspace && !w->isHidden()) {
+        if (winMapped(w) && w->m_workspace && !w->isHidden()) {
             const auto     ws          = w->m_workspace;
-            const bool     wsVis       = ws->visible();
+            const bool     wsVis       = wsVisible(ws);
             const bool     wsForce     = ws->m_forceRendering;
             // Save BOTH value AND goal: setValueAndWarp(x) also sets goal:=x, so restoring
             // only value() pins a mid-animation workspace at a stale goal. That corruption
@@ -1564,7 +1557,7 @@ void Overview::captureSnapshots() {
             // m_forceRendering is THE flag makeSnapshot honours to paint a window on a
             // non-active workspace; without it the window renders empty → black/blank thumb.
             // Only WARP (never assign the goal), else the goal thrash corrupts the workspace.
-            ws->setVisible(true);
+            wsSetVisible(ws, true);
             ws->m_forceRendering = true;
             ws->m_renderOffset->setValueAndWarp(Vector2D{});
             ws->m_alpha->setValueAndWarp(1.0F);
@@ -1583,7 +1576,7 @@ void Overview::captureSnapshots() {
                 m_snapFB[w.get()] = fb;
             m_captureWin.reset();
 
-            ws->setVisible(wsVis);
+            wsSetVisible(ws, wsVis);
             ws->m_forceRendering = wsForce;
             // Warp back to the captured value, then re-aim at the original goal so an
             // in-flight slide resumes to its true destination (operator= no-ops if settled).
@@ -2060,7 +2053,7 @@ void Overview::renderStrip() const {
             // card band over the blurred backdrop bleeds through.
             for (const auto& sw : it.wins) {
                 const auto w = sw.win.lock();
-                if (!w || !w->mapped() || w->isHidden())
+                if (!winMapped(w) || w->isHidden())
                     continue;
                 if (isFlying(w))
                     continue; // still arriving; renderFlyTile is drawing it
@@ -2124,7 +2117,7 @@ void Overview::renderStripWindows() const {
         card.y += slide.y + scroll.y;
         for (const auto& sw : it.wins) {
             const auto w = sw.win.lock();
-            if (!w || !w->mapped() || w->isHidden())
+            if (!winMapped(w) || w->isHidden())
                 continue;
             if (isFlying(w))
                 continue; // still arriving; renderFlyWindow is drawing it
@@ -2220,7 +2213,7 @@ void Overview::drawPreviewTile(size_t i, const LRect& slot, bool lift) const {
 
     const auto& t = m_tiles[i];
     const auto  w = t.win.lock();
-    if (!w || !w->mapped() || w->isHidden())
+    if (!winMapped(w) || w->isHidden())
         return;
 
     // Tile box fitted to the window's real aspect; live surface fills it at uniform scale so
@@ -2280,7 +2273,7 @@ void Overview::drawPreviewRing(size_t i, const LRect& slot, bool lift) const {
     if (!m || i >= m_tiles.size())
         return;
     const auto w = m_tiles[i].win.lock();
-    if (!w || !w->mapped() || w->isHidden())
+    if (!winMapped(w) || w->isHidden())
         return;
 
     const bool framed   = (static_cast<int>(i) == m_hovered || lift);
@@ -2382,7 +2375,7 @@ void Overview::renderMainWindows() const {
             if (static_cast<int>(i) == dragIdx || m_tiles[i].fades != fading)
                 continue;
             const auto w = m_tiles[i].win.lock();
-            if (!w || !w->mapped() || w->isHidden())
+            if (!winMapped(w) || w->isHidden())
                 continue;
             const LRect lb = tileContentBox(i, currentBox(m_tiles[i], static_cast<int>(i)));
             const CBox  px(lb.x * scale, lb.y * scale, lb.w * scale, lb.h * scale);
@@ -2405,7 +2398,7 @@ void Overview::renderPrevPreviews() const {
 
     for (const auto& t : m_prevTiles) {
         const auto w = t.win.lock();
-        if (!w || !w->mapped() || w->isHidden())
+        if (!winMapped(w) || w->isHidden())
             continue;
         const LRect lb{t.target.x + off.x, t.target.y + off.y, t.target.w, t.target.h};
         g_pHyprOpenGL->renderRoundedShadow(pxb(LRect{lb.x, lb.y + 6.0, lb.w, lb.h}, s), pxr(round, s), 2.F, static_cast<int>(16.0 * s), shadowCol, e * 0.9);
@@ -2426,7 +2419,7 @@ void Overview::renderPrevWindows() const {
 
     for (const auto& t : m_prevTiles) {
         const auto w = t.win.lock();
-        if (!w || !w->mapped() || w->isHidden())
+        if (!winMapped(w) || w->isHidden())
             continue;
         const CBox px((t.target.x + off.x) * scale, (t.target.y + off.y) * scale, t.target.w * scale, t.target.h * scale);
         renderWindowLive(w, m, px, px, 1.0F, when, m_previewFilterGrid, round);
@@ -2449,7 +2442,7 @@ void Overview::renderFlyTile() const {
 
     for (const auto& f : m_flying) {
         const auto w = f.win.lock();
-        if (!w || !w->mapped() || w->isHidden())
+        if (!winMapped(w) || w->isHidden())
             continue;
         const LRect  lb    = flyBox(f);
         const double round = flyRound(lb);
@@ -2472,7 +2465,7 @@ void Overview::renderFlyWindow() const {
 
     for (const auto& f : m_flying) {
         const auto w = f.win.lock();
-        if (!w || !w->mapped() || w->isHidden())
+        if (!winMapped(w) || w->isHidden())
             continue;
         const LRect lb = flyBox(f);
         const CBox  px(lb.x * scale, lb.y * scale, lb.w * scale, lb.h * scale);
@@ -2495,7 +2488,7 @@ void Overview::renderDragWindow() const {
     if (!m)
         return;
     const auto w = m_tiles[dragIdx].win.lock();
-    if (!w || !w->mapped() || w->isHidden())
+    if (!winMapped(w) || w->isHidden())
         return;
     const double e     = eased();
     const double scale = m->m_scale;
@@ -2542,7 +2535,7 @@ void Overview::renderAboveLayers() const {
     for (int idx : {2, 3}) {
         for (const auto& ref : m->m_layerSurfaceLayers[idx]) {
             const auto ls = ref.lock();
-            if (!ls || !ls->mapped() || !ls->wlSurface() || !ls->wlSurface()->resource())
+            if (!layerMapped(ls) || !ls->wlSurface() || !ls->wlSurface()->resource())
                 continue;
             if (!isAboveLayer(ls->m_namespace))
                 continue;
@@ -3206,13 +3199,13 @@ namespace {
 uint32_t modBitForKeycode(int kc) {
     switch (kc) {
         case 42:
-        case 54: return static_cast<uint32_t>(Input::HL_MODIFIER_SHIFT);
+        case 54: return MOD_SHIFT;
         case 29:
-        case 97: return static_cast<uint32_t>(Input::HL_MODIFIER_CTRL);
+        case 97: return MOD_CTRL;
         case 56:
-        case 100: return static_cast<uint32_t>(Input::HL_MODIFIER_ALT);
+        case 100: return MOD_ALT;
         case 125:
-        case 126: return static_cast<uint32_t>(Input::HL_MODIFIER_META);
+        case 126: return MOD_META;
         default: return 0;
     }
 }
@@ -3343,13 +3336,13 @@ uint32_t modNameToBit(std::string t) {
     for (auto& c : t)
         c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     if (t == "shift")
-        return static_cast<uint32_t>(Input::HL_MODIFIER_SHIFT);
+        return MOD_SHIFT;
     if (t == "ctrl" || t == "control")
-        return static_cast<uint32_t>(Input::HL_MODIFIER_CTRL);
+        return MOD_CTRL;
     if (t == "alt")
-        return static_cast<uint32_t>(Input::HL_MODIFIER_ALT);
+        return MOD_ALT;
     if (t == "super" || t == "meta" || t == "win")
-        return static_cast<uint32_t>(Input::HL_MODIFIER_META);
+        return MOD_META;
     return 0;
 }
 
@@ -3360,7 +3353,7 @@ uint32_t modNameToBit(std::string t) {
 // through to Hyprland's keybind manager, so the same bind that opened the overview
 // closes it). Only lock states (caps/num) are ignored.
 bool comboMatches(int keycode, uint32_t heldMods, std::string token) {
-    constexpr uint32_t STRICTMODS = static_cast<uint32_t>(Input::HL_MODIFIER_SHIFT | Input::HL_MODIFIER_CTRL | Input::HL_MODIFIER_ALT | Input::HL_MODIFIER_META);
+    constexpr uint32_t STRICTMODS = MOD_STRICT;
 
     uint32_t           need = 0;
     size_t             pos;
@@ -3491,7 +3484,7 @@ void Overview::syncFocus() const {
         return;
     const auto m = m_monitor.lock();
     const auto w = m_tiles[m_selected].win.lock();
-    if (!m || !w || !w->mapped() || w->isHidden())
+    if (!m || !winMapped(w) || w->isHidden())
         return;
     if (w->m_workspace != m->m_activeWorkspace) // displaying a non-live workspace — don't desync
         return;
@@ -3726,7 +3719,7 @@ void Overview::closeWorkspaceWindows(const StripItem& it) {
         return;
     int n = 0;
     for (const auto& w : Desktop::windowState()->windows())
-        if (w && w->mapped() && !w->isHidden() && w->m_workspace == ws) {
+        if (winMapped(w) && !w->isHidden() && w->m_workspace == ws) {
             w->sendClose();
             ++n;
         }

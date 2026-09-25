@@ -7,16 +7,26 @@ on:
     branches: [main]
 
 jobs:
-  build:
-    name: nix build .#gloview
+  build-new:
+    name: nix build (Hyprland 83cf6a6)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@main
         with:
-          # Pull Hyprland's own deps (aquamarine, hyprutils, glaze-hyprland, ...) prebuilt
-          # instead of compiling the whole tree on the runner.
           extra-conf: |
             extra-substituters = https://hyprland.cachix.org
             extra-trusted-public-keys = hyprland.cachix.org-1:a7pgxzMz7+chwVL3/pzj6jIBMioiJM7ypFP8PwtkuGc=
       - run: nix build .#gloview --print-build-logs
+
+  build-legacy:
+    name: nix build (Hyprland v0.56.2)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+        with:
+          extra-conf: |
+            extra-substituters = https://hyprland.cachix.org
+            extra-trusted-public-keys = hyprland.cachix.org-1:a7pgxzMz7+chwVL3/pzj6jIBMioiJM7ypFP8PwtkuGc=
+      - run: nix build .#gloview --override-input hyprland github:hyprwm/Hyprland/v0.56.2 --print-build-logs
