@@ -5,7 +5,7 @@
 `plugin:gloview:no_screen_share` (default **1**) honors Hyprland `noscreenshare` /
 `no_screen_share` on overview **preview tiles** in the screencopy export:
 
-- Hook `Screenshare::CScreenshareFrame::renderMonitor`
+- Hook `Screenshare::CScreenshareFrame::renderMonitor` (fallback: `::render()`)
 - After the original blit + Hyprland window/layer blackouts, for each overview
   preview tile whose window has `w->m_ruleApplicator->noScreenShare().valueOrDefault()`,
   draw a `CRectPassElement` with `Colors::BLACK` on **that tile’s box only**
@@ -18,5 +18,9 @@
 `bindTempFB`/`glClear`, or RENDER_POST EGL remake — those are wrong or ABRT’d on
 NVIDIA / 83cf6a6.
 
-Residual risk: if `findFunctionsByName("renderMonitor")` fails to match the Screenshare
-symbol (ABI rename), blackout is soft-disabled with a notification; overview still loads.
+Resolution: exact Itanium mangling via `dlsym` first
+(`_ZN11Screenshare17CScreenshareFrame13renderMonitorEv`), then
+`findFunctionsByName`. If `renderMonitor` is missing or already hooked (e.g.
+noshare-cover), fall back to `CScreenshareFrame::render()`. Soft-disable is silent
+(debug log only when `plugin:gloview:debug_logs=1`); overview still loads.
+Verified exported on Hyprland v0.56.2 and 83cf6a6.

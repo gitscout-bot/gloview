@@ -269,7 +269,7 @@ class Overview {
     CHyprSignalListener m_keyL;
     CFunctionHook*      m_shouldRenderHook = nullptr;
     CFunctionHook*      m_shouldRenderWindowHook = nullptr; // one-arg shouldRenderWindow, used by makeSnapshot()
-    CFunctionHook*      m_renderMonitorHook = nullptr; // ScreenshareFrame::renderMonitor — per-tile noscreenshare export
+    CFunctionHook*      m_renderMonitorHook = nullptr; // ScreenshareFrame::renderMonitor or ::render — export noscreenshare tiles
 
     // config helpers
     int           cfgInt(const char* name, int fallback) const;

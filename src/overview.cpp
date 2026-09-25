@@ -4,7 +4,9 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <dlfcn.h>
 #include <unordered_set>
+#include <string_view>
 #include <utility>
 
 #include <hyprland/src/Compositor.hpp>
@@ -347,10 +349,13 @@ void renderWindowLive(const PHLWINDOW& w, const PHLMONITOR& mon, const CBox& des
 
 using PSHOULDRENDER              = bool (*)(void*, PHLWINDOW, PHLMONITOR);
 using PSHOULDRENDERWINDOW        = bool (*)(void*, PHLWINDOW);
-using PRENDERMONITOR             = void (*)(void*);
+// Member fns void(CScreenshareFrame::*)() — thisptr is first arg. Same ABI for
+// renderMonitor() and render(); we may fall back to the latter when another plugin
+// (e.g. noshare-cover) already owns renderMonitor.
+using PRENDERSS                  = void (*)(void*);
 PSHOULDRENDER         g_shouldRenderOrig         = nullptr;
 PSHOULDRENDERWINDOW   g_shouldRenderWindowOrig   = nullptr;
-PRENDERMONITOR        g_renderMonitorOrig        = nullptr;
+PRENDERSS             g_screenshareExportOrig    = nullptr;
 
 bool hkShouldRenderWindow(void* thisptr, PHLWINDOW window, PHLMONITOR monitor) {
     if (g_overview) {
@@ -400,11 +405,13 @@ bool shouldHonorNoScreenShareExport() {
     return true;
 }
 
-// Runs inside ScreenshareFrame::copyDmabuf/copyShm → render() → renderMonitor, already in
-// beginRender(RENDER_MODE_TO_BUFFER / FULL_FAKE). Per-tile blacks demka/Discord only.
-void hkRenderMonitor(void* thisptr) {
-    if (g_renderMonitorOrig)
-        g_renderMonitorOrig(thisptr);
+// Runs on the screencopy export path (after mirror blit + Hyprland noscreenshare
+// blackouts), already inside beginRender(RENDER_MODE_TO_BUFFER / FULL_FAKE).
+// Installed on CScreenshareFrame::renderMonitor when free; else on ::render() so we
+// still run after another plugin's renderMonitor hook (noshare-cover, etc.).
+void hkScreenshareExport(void* thisptr) {
+    if (g_screenshareExportOrig)
+        g_screenshareExportOrig(thisptr);
     if (shouldHonorNoScreenShareExport())
         g_overview->blackoutNoScreenShareExportTiles();
 }
@@ -521,7 +528,7 @@ Overview::~Overview() {
     }
     g_shouldRenderOrig       = nullptr;
     g_shouldRenderWindowOrig = nullptr;
-    g_renderMonitorOrig      = nullptr;
+    g_screenshareExportOrig  = nullptr;
 }
 
 bool Overview::initialize() {
@@ -595,45 +602,76 @@ bool Overview::initialize() {
     }
     g_shouldRenderWindowOrig = reinterpret_cast<PSHOULDRENDERWINDOW>(m_shouldRenderWindowHook->m_original);
 
-    // Optional: per-tile noscreenshare via ScreenshareFrame::renderMonitor export blackout.
-    // Failure here must NOT fail plugin init — overview still works; share simply sees
-    // live noscreenshare tiles until the hook can be installed.
-    m_renderMonitorHook  = nullptr;
-    g_renderMonitorOrig  = nullptr;
+    // Optional: per-tile noscreenshare blackout on the screencopy export path.
+    // Failure here must NOT fail plugin init and must NOT spam a scary notify — overview
+    // still works; share simply sees live noscreenshare tiles. Prefer hooking
+    // CScreenshareFrame::renderMonitor; if that symbol is missing OR already hooked by
+    // another plugin (noshare-cover), fall back to CScreenshareFrame::render() which
+    // calls renderMonitor and returns after it. Resolve via exact Itanium mangling
+    // (dlsym) first, then HyprlandAPI::findFunctionsByName. Verified exported on both
+    // Hyprland 83cf6a6 and v0.56.2 (Arch stripped + nix RelWithDebInfo).
+    m_renderMonitorHook       = nullptr;
+    g_screenshareExportOrig   = nullptr;
     {
-        const auto matches = HyprlandAPI::findFunctionsByName(m_handle, "renderMonitor");
-        void*      addr    = nullptr;
-        for (const auto& mt : matches) {
-            // Prefer Screenshare::CScreenshareFrame::renderMonitor(); skip .cold and unrelated.
-            if (mt.demangled.find("Screenshare") == std::string::npos)
-                continue;
-            if (mt.demangled.find("renderMonitor(") == std::string::npos)
-                continue;
-            if (mt.demangled.find(".cold") != std::string::npos)
-                continue;
-            // Skip renderMonitorRegion if it ever appears as a distinct symbol.
-            if (mt.demangled.find("renderMonitorRegion") != std::string::npos)
-                continue;
-            addr = mt.address;
-            break;
-        }
-        if (!addr) {
-            HyprlandAPI::addNotification(m_handle,
-                "[gloview] ScreenshareFrame::renderMonitor not found — no_screen_share tile blackout disabled",
-                CHyprColor(1.0, 0.6, 0.2, 1.0), 6000);
-        } else {
-            m_renderMonitorHook =
-                HyprlandAPI::createFunctionHook(m_handle, addr, reinterpret_cast<void*>(&hkRenderMonitor));
-            if (!m_renderMonitorHook || !m_renderMonitorHook->hook()) {
-                HyprlandAPI::addNotification(m_handle,
-                    "[gloview] failed to hook ScreenshareFrame::renderMonitor — no_screen_share tile blackout disabled",
-                    CHyprColor(1.0, 0.6, 0.2, 1.0), 6000);
-                if (m_renderMonitorHook) {
-                    HyprlandAPI::removeFunctionHook(m_handle, m_renderMonitorHook);
-                    m_renderMonitorHook = nullptr;
+        // Stable Itanium names — identical on 0.56.2 (efb5099) and 83cf6a6.
+        static constexpr const char* kMangledRenderMonitor =
+            "_ZN11Screenshare17CScreenshareFrame13renderMonitorEv";
+        static constexpr const char* kMangledRender =
+            "_ZN11Screenshare17CScreenshareFrame6renderEv";
+
+        auto findByName = [&](const char* shortName, const char* demangleNeedle) -> void* {
+            const auto matches = HyprlandAPI::findFunctionsByName(m_handle, shortName);
+            for (const auto& mt : matches) {
+                if (mt.demangled.find(demangleNeedle) == std::string::npos)
+                    continue;
+                if (mt.demangled.find(".cold") != std::string::npos)
+                    continue;
+                // Exact method, not renderMonitorRegion / nested lambdas.
+                if (demangleNeedle == std::string_view("CScreenshareFrame::renderMonitor") &&
+                    mt.demangled.find("renderMonitorRegion") != std::string::npos)
+                    continue;
+                // For ::render(), require the empty arg list so we don't pick renderWindow/etc.
+                if (demangleNeedle == std::string_view("CScreenshareFrame::render") &&
+                    mt.demangled.find("CScreenshareFrame::render()") == std::string::npos)
+                    continue;
+                return mt.address;
+            }
+            return nullptr;
+        };
+
+        auto resolve = [&](const char* mangled, const char* shortName, const char* demangleNeedle) -> void* {
+            if (void* p = dlsym(RTLD_DEFAULT, mangled))
+                return p;
+            return findByName(shortName, demangleNeedle);
+        };
+
+        auto tryHook = [&](void* addr, const char* label) -> bool {
+            if (!addr)
+                return false;
+            auto* hook = HyprlandAPI::createFunctionHook(m_handle, addr, reinterpret_cast<void*>(&hkScreenshareExport));
+            if (!hook || !hook->hook()) {
+                if (hook) {
+                    HyprlandAPI::removeFunctionHook(m_handle, hook);
+                    hook = nullptr;
                 }
-            } else {
-                g_renderMonitorOrig = reinterpret_cast<PRENDERMONITOR>(m_renderMonitorHook->m_original);
+                dbg(std::string("no_screen_share: could not hook ") + label +
+                    " (missing, unhookable, or already hooked by another plugin)");
+                return false;
+            }
+            m_renderMonitorHook     = hook;
+            g_screenshareExportOrig = reinterpret_cast<PRENDERSS>(hook->m_original);
+            dbg(std::string("no_screen_share: hooked ") + label);
+            return true;
+        };
+
+        void* addrMonitor = resolve(kMangledRenderMonitor, "renderMonitor", "CScreenshareFrame::renderMonitor");
+        void* addrRender  = resolve(kMangledRender, "render", "CScreenshareFrame::render");
+
+        if (!tryHook(addrMonitor, "Screenshare::CScreenshareFrame::renderMonitor()")) {
+            // Another plugin often owns renderMonitor (Hyprland allows one trampoline).
+            // render() wraps it — install after so our tile blackout still runs.
+            if (!tryHook(addrRender, "Screenshare::CScreenshareFrame::render()")) {
+                dbg("no_screen_share tile blackout soft-disabled (no export hook)");
             }
         }
     }
