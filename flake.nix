@@ -2,20 +2,13 @@
   description = "GloView — a macOS Mission Control-style overview plugin for Hyprland";
 
   inputs = {
-    # Default pin: Hyprland 83cf6a6 (workspace/window/IPC refactor). The plugin also
-    # compiles against Hyprland v0.56.2 via compile-time __has_include detection in
-    # src/hypr_compat.hpp — override the input (or `follows` your compositor) to pick ABI:
-    #
-    #   # newer / nixoser-style:
-    #   inputs.hyprland.url = "github:hyprwm/Hyprland?rev=83cf6a6ed540dc37808434259c6a3ba663de9616";
-    #   # Arch / upstream-typical:
-    #   inputs.hyprland.url = "github:hyprwm/Hyprland?ref=v0.56.2";
-    #   # OR always match your system Hyprland:
-    #   inputs.gloview.inputs.hyprland.follows = "hyprland";
-    #
-    # Single package `gloview` — the flake's hyprland input decides the ABI. No separate
-    # gloview-legacy output; override-input / follows is the switch.
-    hyprland.url = "github:hyprwm/Hyprland?rev=83cf6a6ed540dc37808434259c6a3ba663de9616";
+    # Pin a tagged Hyprland release, not `main`: ABI must match the compositor, and main's
+    # dep tree is intermittently unbuildable (e.g. a missing pango buildInput in
+    # hyprland-guiutils broke it on 2026-06-27). v0.57.0 is the version this targets: 0.57
+    # moved per-frame render state into Render::CRenderContext and reworked workspace ids, so
+    # the plugin will not compile against 0.56.x. Downstream should set
+    # `inputs.hyprland.follows` to build the plugin against THEIR exact Hyprland.
+    hyprland.url = "github:hyprwm/Hyprland?ref=v0.57.0";
     nixpkgs.follows = "hyprland/nixpkgs";
     systems.follows = "hyprland/systems";
   };
@@ -33,10 +26,9 @@
   in {
     packages = eachSystem (system: let
       pkgs = pkgsFor.${system};
-      # Use the exact Hyprland derivation from the flake input unchanged. In particular,
-      # do not apply attribute overrides here: even an empty build-phase hook creates
-      # a new Hyprland derivation, so a consumer using inputs.gloview.inputs.hyprland.follows
-      # would rebuild the compositor just to build this plugin.
+      # 0.56.2 needed a postPatch relaxing `find_package(glaze 7...<8)`; 0.57.0 asks for an
+      # unversioned `find_package(glaze QUIET)`, so the tagged package is used as-is (a
+      # leftover `--replace-fail` on that string would now FAIL the build).
       hyprlandPkg = hyprland.packages.${system}.hyprland;
     in {
       # mkHyprlandPlugin now lives in nixpkgs (pkgs.hyprlandPlugins.mkHyprlandPlugin), not in

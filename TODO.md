@@ -53,4 +53,5 @@ NVIDIA / 83cf6a6.
 Resolution: exact Itanium mangling via `dlsym` first, then
 `findFunctionsByName`. Soft-disable of export hooks is silent (debug log only
 when `plugin:gloview:debug_logs=1`); overview still loads. Verified on
-Hyprland v0.56.2 and 83cf6a6.
+Hyprland v0.56.2 and 83cf6a6, and on 0.57.0 after the port (there `render` and
+`renderMonitor` take a `Render::CRenderContext&`).
