@@ -8,7 +8,7 @@
 #include <hyprland/src/config/values/types/FloatValue.hpp>
 #include <hyprland/src/config/values/types/StringValue.hpp>
 #include <hyprland/src/plugins/PluginAPI.hpp>
-#include "hypr_compat.hpp"
+#include <hyprland/src/ipc/s1/S1.hpp>
 
 extern "C" {
 #include <lauxlib.h>
@@ -234,7 +234,6 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     addInt("plugin:gloview:switch_on_new_workspace", Config::INTEGER{1}); // clicking "+" follows the display to the new workspace
     addColor("plugin:gloview:close_button_color", Config::INTEGER{0xe6e23b3bLL}); // desktop-mode "✕" close button fill
 
-    // --- bar / layer-shell hiding (waybar, quickshell-based bars, …) ---
     // no_screen_share: honor Hyprland noscreenshare on overview *preview tiles* in share
     // (per-tile black). Dual-view via ScreenshareFrame::renderMonitor when free, or via
     // noshare-cover extra-rect API (Path C). Old cover without API → Option B while sharing.
@@ -245,6 +244,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     // attempt Path A even if cover is detected. Default 1.
     addInt("plugin:gloview:noshare_cover_compat", Config::INTEGER{1});
 
+    // --- bar / layer-shell hiding (waybar, quickshell-based bars, …) ---
     addInt("plugin:gloview:hide_top_layers", Config::INTEGER{0});     // fade out Top layer surfaces (bars) while the overview is up
     addInt("plugin:gloview:hide_overlay_layers", Config::INTEGER{0}); // fade out Overlay layer surfaces (popups/notifications)
     addStr("plugin:gloview:above_namespaces", "");                    // comma/space list of layer namespaces to draw ABOVE the overview (supports trailing '*' glob); namespaces containing "aboveoverview" are always treated this way
@@ -275,48 +275,87 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     HyprlandAPI::addDispatcherV2(handle, "gloview:prev", dispPrev);
     HyprlandAPI::addDispatcherV2(handle, "gloview:setworkspace", dispSetWorkspace);
 
-    // hyprctl commands (exact, not lua-evaluated) — reliable invoke path: hyprctl <name>
-    // registerExactHyprCtl picks Socket1::SCommand (83cf6a6+) or SHyprCtlCommand (0.56.2).
-    gloview::registerExactHyprCtl(handle, "gloview", [] {
-        if (g_overview)
-            g_overview->toggle();
-    });
+    // hyprctl command (exact, not lua-evaluated) — reliable invoke path:  hyprctl gloview
+    HyprlandAPI::registerHyprCtlCommand(handle, IPC::Socket1::SCommand{
+                                                    .name    = "gloview",
+                                                    .match   = IPC::Socket1::COMMAND_MATCH_EXACT,
+                                                    .handler = [](const IPC::Socket1::SRequest&) -> IPC::Socket1::SResponse {
+                                                        if (g_overview)
+                                                            g_overview->toggle();
+                                                        return "ok\n";
+                                                    },
+                                                });
+
     // close-only (no-op if not open): dismiss the overlay before unloading.
     // Unloading mid-render with the overview up tears down the render hooks while
     // an in-flight frame still references them → Hyprland crash.
-    gloview::registerExactHyprCtl(handle, "gloviewclose", [] {
-        if (g_overview)
-            g_overview->close();
-    });
+    HyprlandAPI::registerHyprCtlCommand(handle, IPC::Socket1::SCommand{
+                                                    .name    = "gloviewclose",
+                                                    .match   = IPC::Socket1::COMMAND_MATCH_EXACT,
+                                                    .handler = [](const IPC::Socket1::SRequest&) -> IPC::Socket1::SResponse {
+                                                        if (g_overview)
+                                                            g_overview->close();
+                                                        return "ok\n";
+                                                    },
+                                                });
+
     // UNLOAD-safe teardown:  hyprctl gloviewunload  — run by the `reload` target
     // before `plugin unload`. Unlike gloviewclose (which only *starts* the close
     // animation), this drops all overlay state + the recapture timer synchronously,
     // so the next frame renders with no plugin-owned pass elements and dlclose can't
     // free a callback that is still referenced mid-frame. Makes reload deterministic.
-    gloview::registerExactHyprCtl(handle, "gloviewunload", [] {
-        if (g_overview)
-            g_overview->hardClose();
-    });
+    HyprlandAPI::registerHyprCtlCommand(handle, IPC::Socket1::SCommand{
+                                                    .name    = "gloviewunload",
+                                                    .match   = IPC::Socket1::COMMAND_MATCH_EXACT,
+                                                    .handler = [](const IPC::Socket1::SRequest&) -> IPC::Socket1::SResponse {
+                                                        if (g_overview)
+                                                            g_overview->hardClose();
+                                                        return "ok\n";
+                                                    },
+                                                });
+
     // free-arrange desktop mode toggle:  hyprctl gloviewdesktop
-    gloview::registerExactHyprCtl(handle, "gloviewdesktop", [] {
-        if (g_overview)
-            g_overview->toggleDesktop();
-    });
+    HyprlandAPI::registerHyprCtlCommand(handle, IPC::Socket1::SCommand{
+                                                    .name    = "gloviewdesktop",
+                                                    .match   = IPC::Socket1::COMMAND_MATCH_EXACT,
+                                                    .handler = [](const IPC::Socket1::SRequest&) -> IPC::Socket1::SResponse {
+                                                        if (g_overview)
+                                                            g_overview->toggleDesktop();
+                                                        return "ok\n";
+                                                    },
+                                                });
+
     // all-workspaces (expo) view toggle:  hyprctl gloviewall — opens into expo if closed
-    gloview::registerExactHyprCtl(handle, "gloviewall", [] {
-        if (g_overview)
-            g_overview->toggleAllWorkspaces();
-    });
+    HyprlandAPI::registerHyprCtlCommand(handle, IPC::Socket1::SCommand{
+                                                    .name    = "gloviewall",
+                                                    .match   = IPC::Socket1::COMMAND_MATCH_EXACT,
+                                                    .handler = [](const IPC::Socket1::SRequest&) -> IPC::Socket1::SResponse {
+                                                        if (g_overview)
+                                                            g_overview->toggleAllWorkspaces();
+                                                        return "ok\n";
+                                                    },
+                                                });
+
     // step the displayed workspace:  hyprctl gloviewnext / gloviewprev
     // (setworkspace takes an argument, so it is dispatcher-only: hyprctl dispatch gloview:setworkspace 2)
-    gloview::registerExactHyprCtl(handle, "gloviewnext", [] {
-        if (g_overview)
-            g_overview->nextWorkspace();
-    });
-    gloview::registerExactHyprCtl(handle, "gloviewprev", [] {
-        if (g_overview)
-            g_overview->prevWorkspace();
-    });
+    HyprlandAPI::registerHyprCtlCommand(handle, IPC::Socket1::SCommand{
+                                                    .name    = "gloviewnext",
+                                                    .match   = IPC::Socket1::COMMAND_MATCH_EXACT,
+                                                    .handler = [](const IPC::Socket1::SRequest&) -> IPC::Socket1::SResponse {
+                                                        if (g_overview)
+                                                            g_overview->nextWorkspace();
+                                                        return "ok\n";
+                                                    },
+                                                });
+    HyprlandAPI::registerHyprCtlCommand(handle, IPC::Socket1::SCommand{
+                                                    .name    = "gloviewprev",
+                                                    .match   = IPC::Socket1::COMMAND_MATCH_EXACT,
+                                                    .handler = [](const IPC::Socket1::SRequest&) -> IPC::Socket1::SResponse {
+                                                        if (g_overview)
+                                                            g_overview->prevWorkspace();
+                                                        return "ok\n";
+                                                    },
+                                                });
 
     const bool isLua = Config::mgr() && Config::mgr()->type() == Config::CONFIG_LUA;
     bool       luaOk = false;

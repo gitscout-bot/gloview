@@ -7,36 +7,21 @@ A better macOS Mission Control-style overview plugin for Hyprland
 
 ## Install
 
-### Dual Hyprland ABI
-
-One codebase builds against both:
-
-| Target | Hyprland | Typical use |
-|---|---|---|
-| **Legacy** | **v0.56.2** | Arch `hyprpm`, upstream-style pins |
-| **New** | **83cf6a6…** (`83cf6a6ed540dc37808434259c6a3ba663de9616`) | nixoser / post–workspace-window-IPC refactor |
-
-Compile-time detection lives in `src/hypr_compat.hpp` (`__has_include` on
-`desktop/view/window/Window.hpp` and `ipc/s1/S1.hpp`). Wrappers cover workspace
-create/query, window mapped/title/appid/presentation, modifiers, hyprctl IPC, and
-noscreenshare accessors. The flake exposes a single `gloview` package; the
-`hyprland` input decides which ABI you link against.
+`main` targets **Hyprland 0.57**. On 0.56.x, hyprpm builds the last pre-0.57 commit of
+this fork by itself (`commit_pins` in `hyprpm.toml`); Nix users on 0.56 pin that commit
+(`fa7a4c5`) themselves.
 
 ### Via hyprpm (Arch / system Hyprland)
 
 Rebuild against **your installed Hyprland headers** so the `.so` matches the
-running compositor (0.56.2 on current Arch packages):
+running compositor:
 
 ```sh
-# this fork (dual ABI) — or upstream fedsfarm/gloview on stock 0.56.2 only
 hyprpm add https://github.com/gitscout-bot/gloview
 hyprpm update
 hyprpm enable gloview
 ```
 
-If enable fails with missing headers such as `ipc/s1/S1.hpp` or
-`desktop/view/window/Window.hpp`, you were on a new-only tree against old
-headers — pull latest `main` (this dual-ABI tree) and `hyprpm update` again.
 `hyprpm` compiles with the system Hyprland pkg-config; no flake override needed.
 
 ### Arch (AUR)
@@ -48,7 +33,7 @@ yay -S gloview
 ### NixOS / Home Manager
 
 **Always** make the plugin follow your compositor's Hyprland input so the ABI
-matches (`follows` is the switch between 0.56.2 and 83cf6a6):
+matches:
 
 ```nix
 inputs.gloview.url = "github:gitscout-bot/gloview";
@@ -68,19 +53,7 @@ wayland.windowManager.hyprland = {
 };
 ```
 
-Flake default pin is `83cf6a6…`. To build explicitly against either side:
-
-```sh
-# new (default lock / nixoser)
-nix build .#gloview -L
-
-# legacy v0.56.2 (Arch-typical)
-nix build .#gloview --override-input hyprland github:hyprwm/Hyprland/v0.56.2 -L
-```
-
-Or set `inputs.hyprland.url` in a consumer flake to
-`github:hyprwm/Hyprland?ref=v0.56.2` or
-`github:hyprwm/Hyprland?rev=83cf6a6ed540dc37808434259c6a3ba663de9616`.
+Without `follows` the flake builds against its own pin, Hyprland v0.57.0.
 
 ## Manual build
 
